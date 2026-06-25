@@ -1,0 +1,13 @@
+{
+  "name": "stream-captions",
+  "version": "0.1.0",
+  "description": "Real-time multilingual subtitles for Twitch and Kick using on-device Whisper (WebGPU).",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "setup": "node scripts/setup.mjs"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.3.0"
+  }
+}
