@@ -30,6 +30,7 @@
   const MAX_UTTERANCE_SEC = 6;    // force-commit a run-on with no pause/sentence break
   const SILENCE_RMS = 0.008;      // audio level below this counts as silence
   const SILENCE_COMMIT_MS = 600;  // this much trailing silence finalizes the line
+  const SEEK_JUMP_SEC = 2;        // playhead move above this is a real seek, not a live-edge nudge
   const HIDE_AFTER_MS = 4000;     // after this much inactivity, the box floats up & fades
   const HISTORY_CAP = 280;        // max chars of scrolled-back transcript kept
 
@@ -73,6 +74,7 @@
   let lastRunAt = 0;
   let silenceMs = 0;
   let processing = false;
+  let mediaTime = 0;                 // playhead as of the last audio chunk, to size seeks
 
   const norm = (w) => w.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
 
@@ -265,6 +267,7 @@
   }
 
   function appendAudio(chunk, sr) {
+    if (hookedVideo) mediaTime = hookedVideo.currentTime;
     const res = resampleTo16k(chunk, sr);
     const chunkMs = (res.length / TARGET_SR) * 1000;
     if (rms(res) < SILENCE_RMS) silenceMs += chunkMs;
@@ -434,11 +437,17 @@
     hookedVideo = media;
 
     if (!media._scBound) {
-      // 'emptied' also covers the player swapping its source under us, which is
-      // how Kick moves between live edge and DVR.
-      for (const evt of ['seeking', 'emptied', 'ended']) {
-        media.addEventListener(evt, () => { if (hookedVideo === media) resetStream(); });
-      }
+      // Only a real jump counts. Live players nudge currentTime constantly to
+      // hold the live edge and to skip buffer gaps, and every nudge fires a seek
+      // event — resetting on those clears the buffer faster than it can fill, so
+      // nothing ever reaches MIN_AUDIO_SEC and captions never appear.
+      media.addEventListener('seeked', () => {
+        if (hookedVideo !== media) return;
+        const jumped = Math.abs(media.currentTime - mediaTime) > SEEK_JUMP_SEC;
+        mediaTime = media.currentTime;
+        if (jumped) resetStream();
+      });
+      media.addEventListener('ended', () => { if (hookedVideo === media) resetStream(); });
       media._scBound = true;
     }
   }
@@ -493,12 +502,13 @@
   }
 
   // ---- SPA navigation: re-hook when the page swaps media elements --------
-  // Only when the element we're on is really gone. During a seek its readyState
-  // dips and findMedia() can briefly prefer some other element on the page —
-  // re-hooking to that would drop the capture for good.
+  // Only when the element we're on is really gone. During a seek findMedia() can
+  // briefly prefer some other element on the page, and re-hooking to that would
+  // drop the capture for good. It must still hold media, so a player that swaps
+  // sources but leaves the old node in the DOM doesn't strand us on a dead one.
   setInterval(() => {
     if (!settings.enabled) return;
-    if (hookedVideo && hookedVideo.isConnected) return;
+    if (hookedVideo && hookedVideo.isConnected && hookedVideo.readyState > 0) return;
     const m = findMedia();
     if (m && m !== hookedVideo) enable();
   }, 2000);
