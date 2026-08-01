@@ -39,29 +39,41 @@ input[type="checkbox"] {
   line-height: 1.4;
   margin: 10px 0 0;
 }
-.support {
-  margin-top: 12px;
-  padding-top: 10px;
-  border-top: 1px solid #2a2830;
-  font-size: 11px;
-  color: #999;
-  line-height: 1.5;
+
+/* ---- per-site opt-in / reload notice ---------------------------------- */
+.notice {
+  background: #21202a;
+  border: 1px solid #3a3842;
+  border-radius: 6px;
+  padding: 9px 10px;
+  margin-bottom: 12px;
 }
-.support-title {
-  display: block;
-  margin-bottom: 6px;
+.notice p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #ddd;
 }
-.support .links {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 10px;
+.notice button {
+  margin-top: 8px;
+  width: 100%;
+  background: #53fc18;
+  color: #16151a;
+  border: 0;
+  border-radius: 5px;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
 }
-.support a {
-  color: #53fc18;
-  text-decoration: none;
-  font-weight: 600;
-  white-space: nowrap;
+.notice button:hover {
+  background: #6bff3a;
 }
-.support a:hover {
-  text-decoration: underline;
+.hidden {
+  display: none;
+}
+/* Controls stay visible but inert until the content script is reachable. */
+.disabled {
+  opacity: 0.4;
+  pointer-events: none;
 }

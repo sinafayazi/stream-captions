@@ -1,11 +1,15 @@
 {
   "name": "stream-captions",
-  "version": "0.1.0",
-  "description": "Real-time multilingual subtitles for Twitch and Kick using on-device Whisper (WebGPU).",
+  "version": "1.0.0",
+  "description": "Real-time subtitles for Kick, Twitch, YouTube and any other video or music, using on-device Whisper (WebGPU).",
   "private": true,
   "type": "module",
+  "license": "MIT",
+  "homepage": "https://github.com/sinafayazi/stream-captions",
   "scripts": {
-    "setup": "node scripts/setup.mjs"
+    "setup": "node scripts/setup.mjs",
+    "icons": "node scripts/generate-icons.mjs",
+    "package": "node scripts/package.mjs"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.3.0"

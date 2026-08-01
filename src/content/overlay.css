@@ -1,33 +1,60 @@
 .sc-overlay {
   position: absolute;
-  left: 50%;
-  bottom: 8%;
-  transform: translateX(-50%);
-  max-width: 80%;
+  width: min(80%, 900px);
   z-index: 2147483647;
   pointer-events: none;
-  opacity: 0;
-  transition: opacity 0.25s ease;
 }
 
-/* Audio/music (no video frame): float fixed at the bottom of the viewport. */
+/* Audio/music (no video frame): anchor to the viewport instead of the player. */
 .sc-overlay-floating {
   position: fixed;
-  bottom: 24px;
-  max-width: 70%;
 }
 
+/* ---- position presets ------------------------------------------------- */
+.sc-pos-bc { left: 50%; bottom: 8%; transform: translateX(-50%); text-align: center; }
+.sc-pos-bl { left: 4%;  bottom: 8%; text-align: left; }
+.sc-pos-br { right: 4%; bottom: 8%; text-align: right; }
+.sc-pos-tc { left: 50%; top: 8%;    transform: translateX(-50%); text-align: center; }
+
+/* ---- the caption bubble: a solid, fixed two-line box ------------------ */
 .sc-text {
   display: inline-block;
-  padding: 0.25em 0.6em;
+  max-width: 100%;
+  padding: 0.3em 0.65em;
   background: rgba(0, 0, 0, 0.72);
+  border-radius: 6px;
   color: #fff;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   font-size: clamp(16px, 2.2vw, 30px);
   line-height: 1.35;
   font-weight: 600;
-  text-align: center;
-  white-space: pre-wrap;
-  border-radius: 6px;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+/* Inactivity / nothing to show: the box floats up and fades out. */
+.sc-text.sc-hidden {
+  opacity: 0;
+  transform: translateY(-0.5em);
+}
+
+/* The two-line "lens": a fixed window the transcript scrolls through. */
+.sc-lens {
+  position: relative;
+  height: 2.7em;        /* exactly 2 * line-height */
+  overflow: hidden;
+}
+
+/* The scrolling transcript. translateY is set in JS to keep the bottom aligned;
+   the transition makes it glide up smoothly like YouTube. */
+.sc-scroll {
+  will-change: transform;
+  transition: transform 0.45s ease;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Volatile tail (still being decided): a touch dimmer than locked text. */
+.sc-tent {
+  opacity: 0.8;
 }

@@ -1,17 +1,32 @@
 {
   "manifest_version": 3,
   "name": "Stream Captions",
-  "version": "0.1.0",
-  "description": "Real-time multilingual subtitles for any video or music — built for Kick, works everywhere. On-device Whisper (WebGPU). Free, private, no server.",
-  "permissions": ["storage", "activeTab"],
-  "host_permissions": ["<all_urls>"],
+  "version": "1.0.0",
+  "description": "Real-time subtitles for any video or music — built for Kick, works everywhere. On-device Whisper (WebGPU). Free & private.",
+  "homepage_url": "https://github.com/sinafayazi/stream-captions",
+  "permissions": ["storage", "activeTab", "scripting"],
+  "optional_host_permissions": ["*://*/*"],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "action": {
     "default_popup": "src/popup/popup.html",
-    "default_title": "Stream Captions"
+    "default_title": "Stream Captions",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
+      "matches": [
+        "*://*.kick.com/*",
+        "*://*.twitch.tv/*",
+        "*://*.youtube.com/*"
+      ],
       "js": ["src/content/overlay.js"],
       "css": ["src/content/overlay.css"],
       "run_at": "document_idle",
@@ -22,8 +37,9 @@
     {
       "resources": [
         "src/content/capture-worklet.js",
-        "src/worker/whisper-worker.js",
-        "vendor/transformers.min.js"
+        "vendor/transformers.min.js",
+        "vendor/ort-wasm-simd-threaded.jsep.wasm",
+        "vendor/ort-wasm-simd-threaded.jsep.mjs"
       ],
       "matches": ["<all_urls>"]
     }

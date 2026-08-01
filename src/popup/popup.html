@@ -7,57 +7,48 @@
 <body>
   <h1>Stream Captions</h1>
 
-  <label class="row toggle">
-    <span>Captions</span>
-    <input type="checkbox" id="enabled" />
-  </label>
+  <!-- Shown when the content script isn't running on this tab: either the page
+       predates the install (reload), or the site needs opt-in access. -->
+  <div class="notice hidden" id="notice">
+    <p id="notice-text"></p>
+    <button id="notice-action" class="hidden"></button>
+  </div>
 
-  <label class="row">
-    <span>Language</span>
-    <select id="language">
-      <option value="auto">Auto-detect</option>
-      <option value="english">English</option>
-      <option value="spanish">Spanish</option>
-      <option value="french">French</option>
-      <option value="german">German</option>
-      <option value="portuguese">Portuguese</option>
-      <option value="russian">Russian</option>
-      <option value="turkish">Turkish</option>
-      <option value="arabic">Arabic</option>
-      <option value="persian">Persian</option>
-      <option value="japanese">Japanese</option>
-      <option value="korean">Korean</option>
-      <option value="chinese">Chinese</option>
-    </select>
-  </label>
+  <div id="controls">
+    <label class="row toggle">
+      <span>Captions</span>
+      <input type="checkbox" id="enabled" />
+    </label>
 
-  <label class="row">
-    <span>Output</span>
-    <select id="task">
-      <option value="transcribe">Original language</option>
-      <option value="translate">Translate to English</option>
-    </select>
-  </label>
+    <label class="row">
+      <span>Language</span>
+      <select id="language">
+        <option value="english" selected>English</option>
+        <option value="" disabled>More languages — coming soon</option>
+      </select>
+    </label>
 
-  <label class="row">
-    <span>Model</span>
-    <select id="model">
-      <option value="Xenova/whisper-tiny">Tiny (fastest)</option>
-      <option value="Xenova/whisper-base" selected>Base (balanced)</option>
-      <option value="Xenova/whisper-small">Small (most accurate)</option>
-    </select>
-  </label>
+    <label class="row">
+      <span>Model</span>
+      <select id="model">
+        <option value="Xenova/whisper-tiny" selected>Tiny (fastest)</option>
+        <option value="Xenova/whisper-base">Base (balanced)</option>
+        <option value="Xenova/whisper-small">Small (most accurate)</option>
+      </select>
+    </label>
 
-  <p class="hint">Works on Kick and any video or music on any site. First run downloads the model (cached afterward). Reload the tab after changing the model.</p>
+    <label class="row">
+      <span>Position</span>
+      <select id="position">
+        <option value="bottom-center" selected>Bottom center</option>
+        <option value="bottom-left">Bottom left</option>
+        <option value="bottom-right">Bottom right</option>
+        <option value="top-center">Top center</option>
+      </select>
+    </label>
+  </div>
 
-  <footer class="support">
-    <span class="support-title">Free &amp; open — support development:</span>
-    <!-- TODO: replace the YOUR_* placeholders with your real handles -->
-    <span class="links">
-      <a href="https://buymeacoffee.com/YOUR_HANDLE" target="_blank" rel="noopener">Buy Me a Coffee ☕</a>
-      <a href="https://ko-fi.com/YOUR_HANDLE" target="_blank" rel="noopener">Ko-fi</a>
-    </span>
-  </footer>
+  <p class="hint">Runs on Kick, Twitch and YouTube out of the box — any other site can be enabled per-site. First run downloads the model (cached afterward); switching models reloads on the fly.</p>
 
   <script src="popup.js"></script>
 </body>
