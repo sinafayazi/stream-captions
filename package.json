@@ -1,7 +1,7 @@
 {
   "name": "stream-captions",
   "version": "1.0.0",
-  "description": "Real-time subtitles for Kick, Twitch, YouTube and any other video or music, using on-device Whisper (WebGPU).",
+  "description": "Real-time subtitles for Kick, Twitch and any other video or music, using on-device Whisper (WebGPU).",
   "private": true,
   "type": "module",
   "license": "MIT",

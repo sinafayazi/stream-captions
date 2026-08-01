@@ -52,8 +52,8 @@ content. You can erase them at any time by removing the extension.
 - **`storage`** — save the preferences described above.
 - **`activeTab`** and **`scripting`** — place the caption overlay into the tab
   you are currently watching, when you ask for it.
-- **Site access on kick.com, twitch.tv and youtube.com** — run the caption
-  overlay automatically on those sites.
+- **Site access on kick.com and twitch.tv** — run the caption overlay
+  automatically on those sites.
 - **Optional access to other sites** — only granted when you explicitly click
   "Enable on this site" for a specific site, and revocable at any time from
   Chrome's extension settings.

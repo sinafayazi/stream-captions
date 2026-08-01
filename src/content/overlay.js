@@ -7,10 +7,10 @@
 // Captions are per-tab: each tab starts disabled and is toggled independently
 // from the popup (the on/off state is not synced across tabs).
 (() => {
-  // This script arrives three ways: the declared content script (Kick/Twitch/
-  // YouTube), an on-demand scripting.executeScript from the popup, and the
-  // dynamic registration that persists that opt-in. They share one isolated
-  // world, so bail if we're already running here.
+  // This script arrives three ways: the declared content script (Kick/Twitch),
+  // an on-demand scripting.executeScript from the popup, and the dynamic
+  // registration that persists that opt-in. They share one isolated world, so
+  // bail if we're already running here.
   if (window.__streamCaptionsLoaded) return;
   window.__streamCaptionsLoaded = true;
 

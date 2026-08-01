@@ -1,8 +1,8 @@
 # Stream Captions
 
 Real-time subtitles for **any video or music on any site** — built first for
-**Kick**, and working out of the box on **Twitch** and **YouTube** too. Speech
-recognition runs **fully on-device** with
+**Kick**, and working out of the box on **Twitch** too. Speech recognition runs
+**fully on-device** with
 [Whisper](https://github.com/openai/whisper) via
 [transformers.js](https://github.com/huggingface/transformers.js) (WebGPU, WASM
 fallback). No server, no API key, no per-minute cost, nothing leaves your
@@ -29,15 +29,15 @@ Then load it in Chrome:
 1. Go to `chrome://extensions`
 2. Enable **Developer mode**
 3. **Load unpacked** → select this folder
-4. Open a Kick / Twitch / YouTube stream or VOD, click the extension icon, flip
+4. Open a Kick or Twitch stream or VOD, click the extension icon, flip
    **Captions** on.
 
 First activation downloads the Whisper model (cached afterward). Give it a few
 seconds, then captions appear over the player.
 
 ## Site access
-The extension runs automatically on **kick.com**, **twitch.tv** and
-**youtube.com**. It requests no other site access at install time.
+The extension runs automatically on **kick.com** and **twitch.tv**. It requests
+no other site access at install time.
 
 For any other site, open the popup and click **Enable on this site** — Chrome
 asks for permission for that one site, the overlay is injected immediately, and
@@ -70,7 +70,7 @@ your device and are discarded as you go. See [PRIVACY.md](PRIVACY.md).
 
 ## Status / roadmap
 Working:
-- [x] On-device transcription overlay for Kick, Twitch, YouTube (live & VOD)
+- [x] On-device transcription overlay for Kick and Twitch (live & VOD)
 - [x] Any other site via per-site opt-in
 - [x] Model switching, overlay position, streaming word-lock display
 - [x] ONNX runtime + transformers.js vendored locally (no remotely hosted code)
@@ -82,6 +82,7 @@ Planned:
 - [ ] `.srt` / `.vtt` export for VODs
 - [ ] Caption styling controls (size, opacity, line count)
 - [ ] Keyboard shortcut to toggle without opening the popup
+- [ ] Work out why YouTube fails, and support it properly
 
 ## Notes & limitations
 - **WebGPU** gives near-real-time on `tiny`/`base`; WASM-only is much slower.
@@ -89,8 +90,11 @@ Planned:
 - Sentence trimming currently assumes a roughly constant speaking rate, so a long
   mid-utterance pause can smear a line. Timestamp-based trimming is the fix.
 - Sites that serve media cross-origin without CORS headers produce silence —
-  `createMediaElementSource` can't read those samples. Kick, Twitch and YouTube
-  all use MSE, so they're fine.
+  `createMediaElementSource` can't read those samples. Kick and Twitch both use
+  MSE, so they're fine.
+- **YouTube doesn't work yet** and is not claimed as supported. You can still try
+  it via **Enable on this site**, but expect it to fail — investigating is on the
+  roadmap above.
 - **Legal:** Whisper's license is clean for commercial use, but re-publishing
   *other people's* stream content has Kick/Twitch ToS and copyright implications
   independent of the transcription tech. Fine for personal use or your own channels.

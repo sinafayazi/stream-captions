@@ -24,8 +24,7 @@
     {
       "matches": [
         "*://*.kick.com/*",
-        "*://*.twitch.tv/*",
-        "*://*.youtube.com/*"
+        "*://*.twitch.tv/*"
       ],
       "js": ["src/content/overlay.js"],
       "css": ["src/content/overlay.css"],
