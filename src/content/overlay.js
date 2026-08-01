@@ -184,13 +184,38 @@
   }
 
   // Whisper narrates non-speech instead of staying quiet: "[BLANK_AUDIO]",
-  // "[Music]", "(upbeat music)", "♪♪♪". None of it is speech, so strip it
-  // outright — ASR output otherwise never contains brackets, and parentheses
-  // only show up in these annotations.
+  // "[Music]", "(upbeat music)", "(applause)". Those are noise to us.
+  //
+  // But it marks *sung* content the same way — "♪ lyrics ♪", "(singing) lyrics"
+  // — so dropping every bracketed group threw away song captions too. Only drop
+  // a group whose contents are entirely stage-direction vocabulary; otherwise
+  // keep the words and drop just the punctuation around them.
+  const NON_SPEECH_RX = new RegExp('^(?:[^\\p{L}\\p{N}]|\\d|\\b(?:' + [
+    'blank', 'audio', 'silence', 'silent', 'no', 'sound', 'none',
+    'music', 'musical', 'instrumental', 'song', 'melody', 'theme', 'jingle',
+    'upbeat', 'soft', 'gentle', 'dramatic', 'tense', 'somber', 'playful', 'slow',
+    'applause', 'clapping', 'cheering', 'cheers', 'crowd', 'laughter', 'laughs',
+    'laughing', 'inaudible', 'indistinct', 'unintelligible', 'crosstalk',
+    'noise', 'static', 'beep', 'beeping', 'chime', 'buzzer', 'sighs', 'coughs',
+    'coughing', 'breathing', 'footsteps', 'wind', 'rain', 'thunder', 'engine',
+    'background', 'playing', 'continues', 'fades', 'in', 'out', 'speaking',
+    'foreign', 'language', 'non', 'english', 'translated',
+    'singing', 'sings', 'humming', 'hums', 'vocalizing', 'whistling',
+  ].join('|') + ')\\b)+$', 'iu');
+
+  // BLANK_AUDIO joins its words with an underscore, which regex counts as a word
+  // character — so split on it before testing, or \b never lands between them.
+  const isNonSpeech = (inner) => NON_SPEECH_RX.test(inner.replace(/_/g, SPACE).trim());
+
+  const keepIfSpeech = (_, inner) => (isNonSpeech(inner) ? SPACE : SPACE + inner + SPACE);
+
   function stripNonSpeech(text) {
     return text
-      .replace(/\[[^\]]*\]?/g, SPACE)
-      .replace(/\([^)]*\)?/g, SPACE)
+      .replace(/\[([^\]]*)\]/g, keepIfSpeech)
+      .replace(/\(([^)]*)\)/g, keepIfSpeech)
+      // An unclosed group is an annotation the decoder cut off mid-word; real
+      // speech never contains a bracket, so there's nothing to salvage.
+      .replace(/[[(][^\])]*$/, SPACE)
       .replace(/[♪♫]/g, SPACE)
       .replace(/\s+/g, SPACE)
       .trim();
