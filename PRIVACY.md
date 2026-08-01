@@ -33,6 +33,12 @@ Hugging Face under their own privacy policy).
 
 The model is then cached by your browser, so subsequent use is fully offline.
 
+The popup contains a donation link to NOWPayments. Its button image is bundled
+inside the extension rather than hot-linked, so simply opening the popup contacts
+nobody. If — and only if — you click it, a normal browser tab opens to
+`nowpayments.io`, at which point their site and privacy policy apply. Nothing
+about you or your use of the extension is passed along.
+
 ## What is stored
 
 The extension stores your preferences — caption language, model size, and

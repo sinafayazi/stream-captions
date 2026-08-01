@@ -40,6 +40,30 @@ input[type="checkbox"] {
   margin: 10px 0 0;
 }
 
+/* ---- donation footer --------------------------------------------------- */
+.support {
+  display: block;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid #2a2830;
+}
+.support-title {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 11px;
+  color: #999;
+}
+.support img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 6px;
+}
+.support a:focus-visible img {
+  outline: 2px solid #53fc18;
+  outline-offset: 2px;
+}
+
 /* ---- per-site opt-in / reload notice ---------------------------------- */
 .notice {
   background: #21202a;
