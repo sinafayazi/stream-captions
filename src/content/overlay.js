@@ -39,7 +39,11 @@
   const SEG_WINDOW_SEC = 10;      // rolling context pyannote sees, independent of the caption buffer
   const SEG_MIN_GAP_SEC = 1.5;    // ignore a turn this soon after the last one we acted on
   const SPK_MODEL = 'onnx-community/wespeaker-voxceleb-resnet34-LM';
-  const SPEAKER_SIM = 0.7;        // cosine above this is the same voice
+  const SPEAKER_SIM = 0.6;        // cosine above this is the same voice
+  const SPEAKER_STICKY = 0.08;    // bonus for the previous line's speaker; turns are rarer than continuations
+  const SPK_MIN_WORDS = 3;        // fewer words than this isn't enough speech to identify
+  const SPK_NEW_MIN_WORDS = 7;    // ...and opening a *new* identity needs more evidence still
+  const SPK_NEW_MIN_SEC = 1.5;
   const SPK_MIN_SEC = 1.0;        // shorter clips don't embed reliably
   const SPK_MAX_SEC = 3;          // embed only the tail; a longer clip risks two voices in one vector
   const MAX_SPEAKERS = 6;         // cap the roster; streams aren't unbounded casts
@@ -503,15 +507,23 @@
 
   // Nearest known voice, or a new one. Centroids are a running mean, so a speaker
   // keeps sharpening as they talk instead of being pinned to their first clip.
-  function assignSpeaker(vec) {
+  //
+  // Matching is deliberately easier than creating. Getting it wrong in the
+  // matching direction merges two people; getting it wrong in the creating
+  // direction turns one person into S1/S2/S3 line by line, or promotes a
+  // grenade to a cast member — both far more obvious to a viewer.
+  function assignSpeaker(vec, canCreate) {
     let best = -1;
     let bestSim = -Infinity;
-    lastSpeakerSim = 0;
     for (let i = 0; i < speakers.length; i++) {
-      const sim = cosine(vec, speakers[i].centroid);
+      let sim = cosine(vec, speakers[i].centroid);
+      // Consecutive lines are usually the same person still talking. That prior
+      // is worth more than a marginal cosine difference.
+      if (i === lastLineSpeaker) sim += SPEAKER_STICKY;
       if (sim > bestSim) { bestSim = sim; best = i; }
     }
     lastSpeakerSim = speakers.length ? bestSim : 0;
+
     if (best >= 0 && bestSim >= SPEAKER_SIM) {
       const s = speakers[best];
       const merged = new Float32Array(vec.length);
@@ -520,13 +532,21 @@
       s.count++;
       return best;
     }
-    if (speakers.length >= MAX_SPEAKERS) return best; // don't grow without bound
+    // Below the bar and not allowed to open a new identity: say we don't know
+    // rather than pinning it on the nearest voice.
+    if (!canCreate || speakers.length >= MAX_SPEAKERS) return -1;
     speakers.push({ centroid: vec, count: 1 });
     return speakers.length - 1;
   }
 
-  async function speakerIdFor(audio) {
+  // `text` is what Whisper made of this clip. A grenade going off still yields a
+  // perfectly good embedding — WeSpeaker has no notion of "that wasn't a voice" —
+  // so the transcript is our evidence that anyone actually spoke.
+  async function speakerIdFor(audio, text) {
     if (!embedder || audio.length < TARGET_SR * SPK_MIN_SEC) return -1;
+    const words = (text || '').trim().split(/\s+/).filter(Boolean).length;
+    if (words < SPK_MIN_WORDS) return -1;
+    const canCreate = words >= SPK_NEW_MIN_WORDS && audio.length >= TARGET_SR * SPK_NEW_MIN_SEC;
     try {
       // Embed the tail only. A long window can span two voices, and averaging
       // them produces a vector close to everyone — which collapses the whole
@@ -539,7 +559,7 @@
       const tensor = out.embeddings ?? out.logits ?? Object.values(out)[0];
       const data = tensor && tensor.data ? tensor.data : tensor;
       if (!data || !data.length) return -1;
-      return assignSpeaker(unit(data));
+      return assignSpeaker(unit(data), canCreate);
     } catch (err) {
       console.warn('[Stream Captions] speaker embedding failed:', err);
       return -1;
@@ -779,7 +799,7 @@
         speakerBreakPending = true;
         // Identify the voice from the audio that produced this line, before it
         // is discarded — once per line, not once per interim pass.
-        if (interim) { currentSpeaker = await speakerIdFor(audio); logSpeaker(); }
+        if (interim) { currentSpeaker = await speakerIdFor(audio, interim); logSpeaker(); }
         commit();
         pending = rest;
         silenceMs = 0;
@@ -789,7 +809,7 @@
 
       const shouldCommit = silent || tooLong;
       if (shouldCommit && interim) {
-        currentSpeaker = await speakerIdFor(audio);
+        currentSpeaker = await speakerIdFor(audio, interim);
         logSpeaker();
         commit();
       }
