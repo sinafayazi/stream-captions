@@ -34,8 +34,10 @@
   const SEEK_JUMP_SEC = 2;        // playhead move above this is a real seek, not a live-edge nudge
   const SEG_MODEL = 'onnx-community/pyannote-segmentation-3.0';
   const SPEAKER_CONF = 0.5;       // ignore low-confidence speaker boundaries
-  const SEG_MIN_SEC = 2;          // don't look for a turn in less audio than this
+  const SEG_MIN_SEC = 3;          // don't look for a turn in less audio than this
   const SEG_EVERY_MS = 1000;      // ...and at most this often, it's a second model per pass
+  const SEG_WINDOW_SEC = 10;      // rolling context pyannote sees, independent of the caption buffer
+  const SEG_MIN_GAP_SEC = 1.5;    // ignore a turn this soon after the last one we acted on
   const HIDE_AFTER_MS = 4000;     // after this much inactivity, the box floats up & fades
   const HISTORY_CAP = 280;        // max chars of scrolled-back transcript kept
 
@@ -65,6 +67,7 @@
   let tentSpan = null;
   let overlayFloating = false;
   let lastSig = null;
+  let lastScrollText = '';
   let hideTimer = null;
 
   // Whisper engine state (runs on this thread).
@@ -76,6 +79,10 @@
   let segmenter = null;
   let segLoading = false;
   let lastSegAt = 0;
+  let segBuf = new Float32Array(0);   // rolling audio for segmentation, survives commits
+  let totalSamples = 0;              // every sample ever captured, as a stream clock
+  let lastTurnAbs = -Infinity;       // stream time of the last turn we acted on
+  let speakerBreakPending = false;   // a turn we couldn't split on; break at the next commit
 
   // Streaming state.
   let pending = new Float32Array(0); // audio for the in-progress utterance (16kHz)
@@ -89,6 +96,7 @@
   let mediaTime = 0;                 // playhead as of the last audio chunk, to size seeks
 
   const norm = (w) => w.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+  const streamSec = () => totalSamples / TARGET_SR;
 
   // ---- overlay rendering -------------------------------------------------
   function ensureOverlay(media) {
@@ -110,6 +118,7 @@
     textEl.appendChild(lensEl);
     overlayEl.appendChild(textEl);
 
+    lastScrollText = '';
     overlayFloating = media.tagName !== 'VIDEO';
     const host = overlayFloating ? document.body : media.parentElement || document.body;
     if (!overlayFloating && getComputedStyle(host).position === 'static') host.style.position = 'relative';
@@ -127,9 +136,25 @@
 
   // Keep the transcript top-aligned while it fits two lines; once it's taller,
   // scroll the newest text up into view (smoothly, via CSS transition).
+  //
+  // Only *appended* text animates. When the text is replaced or trimmed instead
+  // — the history cap slicing from the left, a marker taking over, a hypothesis
+  // coming back shorter — the content gets shorter, and animating that reads as
+  // the transcript scrolling backwards. Snap through those.
   function updateScroll() {
     if (!lensEl || !scrollEl) return;
+    const text = finalSpan.textContent + tentSpan.textContent;
+    const appended = text.startsWith(lastScrollText);
+    lastScrollText = text;
+
     const offset = Math.min(0, lensEl.clientHeight - scrollEl.scrollHeight);
+    if (!appended) {
+      scrollEl.style.transition = 'none';
+      scrollEl.style.transform = `translateY(${offset}px)`;
+      void scrollEl.offsetHeight; // flush, so the next append animates again
+      scrollEl.style.transition = '';
+      return;
+    }
     scrollEl.style.transform = `translateY(${offset}px)`;
   }
 
@@ -379,8 +404,12 @@
     }
   }
 
-  // Seconds into `audio` where the speaker last changes, or -1.
-  async function speakerTurnAt(audio) {
+  // How many seconds before the END of `audio` the speaker last changed, or -1.
+  //
+  // Measured from the end because this runs over a rolling window that outlives
+  // any one utterance, while the caption buffer it has to line up with is
+  // cleared on every pause. The end is the only point the two share.
+  async function speakerTurnFromEnd(audio) {
     if (!segmenter) return -1;
     try {
       const { input_values } = await segmenter.processor(audio);
@@ -395,9 +424,14 @@
         if (segments[i].confidence < SPEAKER_CONF) continue;
         change = segments[i].start;
       }
-      // Both sides must be worth decoding on their own.
-      if (change < MIN_AUDIO_SEC || dur - change < 0.3) return -1;
-      return change;
+      if (change < 0) return -1;
+
+      // Ignore a change we've already acted on: the window keeps sliding over it
+      // for several seconds afterwards.
+      const absolute = streamSec() - (dur - change);
+      if (absolute <= lastTurnAbs + SEG_MIN_GAP_SEC) return -1;
+      lastTurnAbs = absolute;
+      return dur - change;
     } catch (err) {
       console.warn('[Stream Captions] segmentation failed:', err);
       return -1;
@@ -420,6 +454,17 @@
     merged.set(pending, 0);
     merged.set(res, pending.length);
     pending = merged;
+
+    // Segmentation needs context across pauses — a speaker change nearly always
+    // contains one, and `pending` is cleared every time that happens. Keep an
+    // independent rolling window so the turn is still visible afterwards.
+    totalSamples += res.length;
+    const segCap = TARGET_SR * SEG_WINDOW_SEC;
+    const segNext = new Float32Array(Math.min(segCap, segBuf.length + res.length));
+    const keep = segNext.length - res.length;
+    segNext.set(segBuf.subarray(segBuf.length - keep), 0);
+    segNext.set(res, keep);
+    segBuf = segNext;
 
     scheduleTranscribe();
   }
@@ -450,6 +495,7 @@
   // Utterance ended (silence / length cap): finalize the line, reset.
   function commit() {
     if (interim) pushHistory(interim);
+    if (speakerBreakPending) { breakLine(); speakerBreakPending = false; }
     interim = '';
     prevHyp = [];
     displayed = [];
@@ -503,12 +549,22 @@
     // window first would put the new speaker's words at the tail of the old
     // speaker's line, and then repeat them on the next line.
     let turnCut = -1;
-    if (segmenter && audio.length >= TARGET_SR * SEG_MIN_SEC && now - lastSegAt >= SEG_EVERY_MS) {
+    if (segmenter && segBuf.length >= TARGET_SR * SEG_MIN_SEC && now - lastSegAt >= SEG_EVERY_MS) {
       lastSegAt = now;
-      const turnSec = await speakerTurnAt(audio);
-      if (turnSec > 0) {
-        turnCut = Math.floor(turnSec * TARGET_SR);
-        audio = audio.slice(0, turnCut);
+      const fromEnd = await speakerTurnFromEnd(segBuf);
+      if (fromEnd > 0) {
+        // Place the turn inside the caption buffer, which is shorter than the
+        // segmentation window and shares only its end.
+        const pendSec = pending.length / TARGET_SR;
+        const cutSec = pendSec - fromEnd;
+        if (cutSec >= MIN_AUDIO_SEC && fromEnd >= 0.3) {
+          turnCut = Math.floor(cutSec * TARGET_SR);
+          audio = audio.slice(0, turnCut);
+        } else {
+          // The change predates what we're holding — the pause already ended the
+          // line, so just make sure the next one starts on its own row.
+          speakerBreakPending = true;
+        }
       }
     }
 
@@ -548,8 +604,8 @@
       // the tail has to be rescued first.
       if (turnCut > 0) {
         const rest = pending.slice(turnCut);
+        speakerBreakPending = true;
         commit();
-        breakLine();
         pending = rest;
         silenceMs = 0;
         console.log(`[Stream Captions] ${device} · ${(audio.length / TARGET_SR).toFixed(1)}s in ${ms}ms · SPEAKER TURN`);
@@ -590,6 +646,9 @@
   // spliced together from two different points in the stream.
   function resetStream() {
     pending = new Float32Array(0);
+    segBuf = new Float32Array(0);
+    speakerBreakPending = false;
+    lastTurnAbs = -Infinity;
     interim = '';
     history = '';
     prevHyp = [];
