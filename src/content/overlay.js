@@ -38,15 +38,6 @@
   const SEG_EVERY_MS = 1000;      // ...and at most this often, it's a second model per pass
   const SEG_WINDOW_SEC = 10;      // rolling context pyannote sees, independent of the caption buffer
   const SEG_MIN_GAP_SEC = 1.5;    // ignore a turn this soon after the last one we acted on
-  const SPK_MODEL = 'onnx-community/wespeaker-voxceleb-resnet34-LM';
-  const SPEAKER_SIM = 0.6;        // cosine above this is the same voice
-  const SPEAKER_STICKY = 0.08;    // bonus for the previous line's speaker; turns are rarer than continuations
-  const SPK_MIN_WORDS = 3;        // fewer words than this isn't enough speech to identify
-  const SPK_NEW_MIN_WORDS = 7;    // ...and opening a *new* identity needs more evidence still
-  const SPK_NEW_MIN_SEC = 1.5;
-  const SPK_MIN_SEC = 1.0;        // shorter clips don't embed reliably
-  const SPK_MAX_SEC = 3;          // embed only the tail; a longer clip risks two voices in one vector
-  const MAX_SPEAKERS = 6;         // cap the roster; streams aren't unbounded casts
   const HIDE_AFTER_MS = 4000;     // after this much inactivity, the box floats up & fades
   const STALL_MS = 8000;          // engine up this long with nothing decoded = report why
   const MAX_CAPTURE_GAIN = 20;    // ceiling when compensating for a quiet player
@@ -96,12 +87,6 @@
   let totalSamples = 0;              // every sample ever captured, as a stream clock
   let lastTurnAbs = -Infinity;       // stream time of the last turn we acted on
   let speakerBreakPending = false;   // a turn we couldn't split on; break at the next commit
-  let embedder = null;               // WeSpeaker, for identity across windows
-  let embLoading = false;
-  let speakers = [];                 // [{centroid, count}] voice roster
-  let currentSpeaker = -1;           // who the line being committed belongs to
-  let lastLineSpeaker = -1;          // who the previous committed line belonged to
-  let lastSpeakerSim = 0;            // similarity behind the last assignment, for tuning
 
   // Streaming state.
   let pending = new Float32Array(0); // audio for the in-progress utterance (16kHz)
@@ -187,8 +172,8 @@
     if (!overlayEl) return;
     let fp = 0;
     while (fp < displayed.length && displayed[fp].final) fp++;
-    const finalWords = turnsToBreaks(displayed.slice(0, fp).map((d) => d.text).join(SPACE));
-    const tentWords = turnsToBreaks(displayed.slice(fp).map((d) => d.text).join(SPACE));
+    const finalWords = formatLines(displayed.slice(0, fp).map((d) => d.text).join(SPACE));
+    const tentWords = formatLines(displayed.slice(fp).map((d) => d.text).join(SPACE));
     const sig = history + '\n' + finalWords + '\n' + tentWords;
     if (sig === lastSig) { bumpHide(); return; }
 
@@ -259,7 +244,15 @@
   // closed captions in its training data. That's a free turn signal from the
   // model itself, independent of PyAnnote, so honour it as a line break instead
   // of printing the arrows.
-  const turnsToBreaks = (text) => text.replace(/\s*>>+\s*/g, '\n').replace(/^\n+/, '');
+  const turnsToBreaks = (text) => text.replace(/\s*>>+\s*/g, '\n');
+
+  // One sentence per row. Without this the transcript runs together into a
+  // paragraph and a viewer can't tell where one thought ends and the next
+  // begins — which is most of what speaker labels were being asked to convey.
+  // A closing quote or bracket belongs to the sentence it ends.
+  const splitSentences = (text) => text.replace(/([.!?…]+["'\u2019\u201d)\]]?)\s+/g, '$1\n');
+
+  const formatLines = (text) => splitSentences(turnsToBreaks(text)).replace(/^\n+/, '').trim();
 
   // ---- whisper engine ----------------------------------------------------
   function resampleTo16k(input, srcRate) {
@@ -284,12 +277,13 @@
   }
 
   // Whisper narrates non-speech instead of staying quiet, and the annotations
-  // fall into three groups we treat differently:
+  // fall into four groups we treat differently:
   //
-  //   [BLANK_AUDIO], [silence], [static]  — nothing is happening. Drop it.
-  //   [Music], (upbeat music), ♪♪♪        — worth telling the viewer about, the
-  //                                         way broadcast captions do. Show ♪.
-  //   ♪ lyrics ♪, (singing) lyrics        — actual sung words. Keep the words.
+  //   [BLANK_AUDIO], [silence]      — nothing is happening. Drop it.
+  //   [Music], (upbeat music), ♪♪♪  — show ♪, the way broadcast captions do.
+  //   [EXPLOSION], (gunfire)        — a sound worth knowing about. Keep it as
+  //                                   [explosion], same as broadcast captions.
+  //   ♪ lyrics ♪, (singing) lyrics  — actual sung words. Keep the words.
   //
   // Anything bracketed that isn't stage-direction vocabulary is speech the model
   // parenthesised, so keep the words and drop only the brackets.
@@ -299,19 +293,41 @@
     'singing', 'sings', 'humming', 'hums', 'vocalizing', 'whistling',
     'playing', 'continues', 'fades', 'in', 'out', 'background',
   ];
-  const OTHER_NON_SPEECH_WORDS = [
+  // Nothing to report — drop these silently.
+  const SILENCE_WORDS = [
     'blank', 'audio', 'silence', 'silent', 'no', 'sound', 'none',
-    'applause', 'clapping', 'cheering', 'cheers', 'crowd', 'laughter', 'laughs',
-    'laughing', 'inaudible', 'indistinct', 'unintelligible', 'crosstalk',
-    'noise', 'static', 'beep', 'beeping', 'chime', 'buzzer', 'sighs', 'coughs',
-    'coughing', 'breathing', 'footsteps', 'wind', 'rain', 'thunder', 'engine',
+    'inaudible', 'indistinct', 'unintelligible', 'crosstalk',
     'speaking', 'foreign', 'language', 'non', 'english', 'translated',
+  ];
+  // Real events. Worth showing, bracketed, exactly as captions have always done.
+  const EVENT_WORDS = [
+    'explosion', 'explosions', 'explodes', 'blast', 'boom', 'bang', 'crash',
+    'gunshot', 'gunshots', 'gunfire', 'shooting', 'shots', 'firing',
+    'applause', 'clapping', 'cheering', 'cheers', 'crowd', 'booing',
+    'laughter', 'laughs', 'laughing', 'screaming', 'screams', 'shouting',
+    'yelling', 'sighs', 'coughs', 'coughing', 'breathing', 'gasps', 'groans',
+    'beep', 'beeping', 'chime', 'buzzer', 'siren', 'alarm', 'ringing', 'phone',
+    'knocking', 'door', 'footsteps', 'glass', 'breaking', 'thud', 'click',
+    'engine', 'car', 'tires', 'revving', 'helicopter', 'thunder', 'rain',
+    'wind', 'water', 'splash', 'static', 'noise', 'whoosh', 'whistle', 'horn',
+    'typing', 'keyboard', 'barking', 'roar', 'growl',
+  ];
+  // Glue that shows up inside annotations: "[knocking on door]", "[distant
+  // gunfire]". Allowed within an event, but never enough to make one on its own.
+  const FILLER_WORDS = [
+    'on', 'at', 'of', 'the', 'a', 'an', 'and', 'with', 'from', 'to', 'off',
+    'up', 'down', 'over', 'distant', 'loud', 'soft', 'faint', 'muffled',
+    'nearby', 'continues', 'continuing', 'heavy', 'light', 'several',
   ];
   const vocabRx = (words) => new RegExp(
     '^(?:[^\\p{L}\\p{N}]|\\d|\\b(?:' + words.join('|') + ')\\b)+$', 'iu');
 
   const MUSIC_RX = vocabRx(MUSIC_WORDS);
-  const NON_SPEECH_RX = vocabRx([...MUSIC_WORDS, ...OTHER_NON_SPEECH_WORDS]);
+  // Every token is event-or-filler...
+  const EVENT_RX = vocabRx([...EVENT_WORDS, ...FILLER_WORDS]);
+  // ...and at least one is an actual event, so "[the]" doesn't become a sound.
+  const EVENT_CORE_RX = new RegExp('\\b(?:' + EVENT_WORDS.join('|') + ')\\b', 'i');
+  const NON_SPEECH_RX = vocabRx([...MUSIC_WORDS, ...SILENCE_WORDS, ...EVENT_WORDS, ...FILLER_WORDS]);
 
   // BLANK_AUDIO joins its words with an underscore, which regex counts as a word
   // character — so split on it before testing, or \b never lands between them.
@@ -321,8 +337,11 @@
   function stripNonSpeech(text) {
     let music = /[♪♫]/.test(text);
     const group = (_, inner) => {
-      if (!NON_SPEECH_RX.test(forTest(inner))) return SPACE + inner + SPACE;
-      if (MUSIC_RX.test(forTest(inner))) music = true;
+      const probe = forTest(inner);
+      if (!NON_SPEECH_RX.test(probe)) return SPACE + inner + SPACE; // speech in brackets
+      if (MUSIC_RX.test(probe)) { music = true; return SPACE; }
+      // Keep sound events, normalised to one bracketed lowercase form.
+      if (EVENT_RX.test(probe) && EVENT_CORE_RX.test(probe)) return `${SPACE}[${probe.toLowerCase()}]${SPACE}`;
       return SPACE;
     };
     const out = text
@@ -416,7 +435,6 @@
       console.log(`[Stream Captions] engine ready · ${settings.model} · ${device} · english-only=${isEnglishOnly(settings.model)}`);
       setStatus(`Captions on · ${device.toUpperCase()} · listening…`);
       startSegmenter(); // background: captions must not wait on it
-      startEmbedder();
     } catch (err) {
       console.error('[Stream Captions] engine load failed:', err);
       setStatus(`⚠️ ${err && err.message ? err.message : err}`);
@@ -462,122 +480,6 @@
     } finally {
       segLoading = false;
     }
-  }
-
-  // ---- speaker identity --------------------------------------------------
-  // PyAnnote says *that* the voice changed; it can't say who, because its labels
-  // only mean anything inside the one window it was given. WeSpeaker turns a clip
-  // into a voice embedding that stays comparable across the whole stream, so
-  // those can be clustered online to give each speaker a stable number.
-  async function startEmbedder() {
-    if (embedder || embLoading) return;
-    embLoading = true;
-    try {
-      const { WeSpeakerResNetModel, AutoProcessor } =
-        await import(chrome.runtime.getURL('vendor/transformers.min.js'));
-      const [model, processor] = await Promise.all([
-        onDeviceOrWasm((d) => WeSpeakerResNetModel.from_pretrained(SPK_MODEL, { device: d })),
-        AutoProcessor.from_pretrained(SPK_MODEL),
-      ]);
-      embedder = { model, processor };
-      console.log('[Stream Captions] speaker identity ready');
-    } catch (err) {
-      console.warn('[Stream Captions] speaker identity unavailable:', err);
-      embedder = null;
-    } finally {
-      embLoading = false;
-    }
-  }
-
-  // Both sides are unit vectors, so the dot product is the cosine.
-  function cosine(a, b) {
-    let dot = 0;
-    for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
-    return dot;
-  }
-
-  function unit(vec) {
-    let n = 0;
-    for (let i = 0; i < vec.length; i++) n += vec[i] * vec[i];
-    n = Math.sqrt(n) || 1;
-    const out = new Float32Array(vec.length);
-    for (let i = 0; i < vec.length; i++) out[i] = vec[i] / n;
-    return out;
-  }
-
-  // Nearest known voice, or a new one. Centroids are a running mean, so a speaker
-  // keeps sharpening as they talk instead of being pinned to their first clip.
-  //
-  // Matching is deliberately easier than creating. Getting it wrong in the
-  // matching direction merges two people; getting it wrong in the creating
-  // direction turns one person into S1/S2/S3 line by line, or promotes a
-  // grenade to a cast member — both far more obvious to a viewer.
-  function assignSpeaker(vec, canCreate) {
-    let best = -1;
-    let bestSim = -Infinity;
-    for (let i = 0; i < speakers.length; i++) {
-      let sim = cosine(vec, speakers[i].centroid);
-      // Consecutive lines are usually the same person still talking. That prior
-      // is worth more than a marginal cosine difference.
-      if (i === lastLineSpeaker) sim += SPEAKER_STICKY;
-      if (sim > bestSim) { bestSim = sim; best = i; }
-    }
-    lastSpeakerSim = speakers.length ? bestSim : 0;
-
-    if (best >= 0 && bestSim >= SPEAKER_SIM) {
-      const s = speakers[best];
-      const merged = new Float32Array(vec.length);
-      for (let i = 0; i < vec.length; i++) merged[i] = s.centroid[i] * s.count + vec[i];
-      s.centroid = unit(merged);
-      s.count++;
-      return best;
-    }
-    // Below the bar and not allowed to open a new identity: say we don't know
-    // rather than pinning it on the nearest voice.
-    if (!canCreate || speakers.length >= MAX_SPEAKERS) return -1;
-    speakers.push({ centroid: vec, count: 1 });
-    return speakers.length - 1;
-  }
-
-  // `text` is what Whisper made of this clip. A grenade going off still yields a
-  // perfectly good embedding — WeSpeaker has no notion of "that wasn't a voice" —
-  // so the transcript is our evidence that anyone actually spoke.
-  async function speakerIdFor(audio, text) {
-    if (!embedder || audio.length < TARGET_SR * SPK_MIN_SEC) return -1;
-    const words = (text || '').trim().split(/\s+/).filter(Boolean).length;
-    if (words < SPK_MIN_WORDS) return -1;
-    const canCreate = words >= SPK_NEW_MIN_WORDS && audio.length >= TARGET_SR * SPK_NEW_MIN_SEC;
-    try {
-      // Embed the tail only. A long window can span two voices, and averaging
-      // them produces a vector close to everyone — which collapses the whole
-      // roster into a single cluster and suppresses labels entirely.
-      const cap = TARGET_SR * SPK_MAX_SEC;
-      const clip = audio.length > cap ? audio.slice(-cap) : audio;
-      const inputs = await embedder.processor(clip);
-      const out = await embedder.model(inputs);
-      // The output key varies by export; take the embedding whatever it's called.
-      const tensor = out.embeddings ?? out.logits ?? Object.values(out)[0];
-      const data = tensor && tensor.data ? tensor.data : tensor;
-      if (!data || !data.length) return -1;
-      return assignSpeaker(unit(data), canCreate);
-    } catch (err) {
-      console.warn('[Stream Captions] speaker embedding failed:', err);
-      return -1;
-    }
-  }
-
-  // One cluster swallowing everyone is indistinguishable from the feature being
-  // off, since labels need two known voices. Report which it is.
-  function logSpeaker() {
-    if (!embedder) { console.log('[Stream Captions] speaker: embedder not loaded'); return; }
-    console.log(`[Stream Captions] speaker S${currentSpeaker + 1} · sim ${lastSpeakerSim.toFixed(2)} · threshold ${SPEAKER_SIM} · roster ${speakers.length}`);
-  }
-
-  // Label only when the voice actually changes. Repeating it on every line of a
-  // monologue is noise in a two-line lens.
-  function speakerPrefix(id) {
-    if (id < 0 || speakers.length < 2 || id === lastLineSpeaker) return '';
-    return `S${id + 1}: `;
   }
 
   // How many seconds before the END of `audio` the speaker last changed, or -1.
@@ -673,12 +575,7 @@
   // Utterance ended (silence / length cap): finalize the line, reset.
   function commit() {
     if (interim) {
-      const prefix = speakerPrefix(currentSpeaker);
-      // A new voice always starts its own row. Without this the label lands
-      // mid-sentence, in the middle of the previous speaker's line.
-      if (prefix) breakLine();
-      pushHistory(prefix + turnsToBreaks(interim));
-      if (currentSpeaker >= 0) lastLineSpeaker = currentSpeaker;
+      pushHistory(formatLines(interim));
     }
     if (speakerBreakPending) { breakLine(); speakerBreakPending = false; }
     interim = '';
@@ -799,7 +696,6 @@
         speakerBreakPending = true;
         // Identify the voice from the audio that produced this line, before it
         // is discarded — once per line, not once per interim pass.
-        if (interim) { currentSpeaker = await speakerIdFor(audio, interim); logSpeaker(); }
         commit();
         pending = rest;
         silenceMs = 0;
@@ -809,8 +705,6 @@
 
       const shouldCommit = silent || tooLong;
       if (shouldCommit && interim) {
-        currentSpeaker = await speakerIdFor(audio, interim);
-        logSpeaker();
         commit();
       }
       console.log(`[Stream Captions] ${device} · ${(audio.length / TARGET_SR).toFixed(1)}s in ${ms}ms · ${shouldCommit ? 'COMMIT' : 'interim'}`);
@@ -855,8 +749,6 @@
     segBuf = new Float32Array(0);
     speakerBreakPending = false;
     lastTurnAbs = -Infinity;
-    currentSpeaker = -1;
-    lastLineSpeaker = -1;
     interim = '';
     history = '';
     prevHyp = [];
@@ -1035,9 +927,6 @@
         device,
         engine: !!transcriber,
         segmenter: !!segmenter,   // speaker turns
-        embedder: !!embedder,     // speaker identity
-        speakers: speakers.length,
-        sim: lastSpeakerSim,
       });
     }
     return true;

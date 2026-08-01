@@ -61,13 +61,9 @@ function hideNotice() {
 function showDiag(s) {
   if (!s.enabled || !s.engine) return;
   const mark = (on, label) => `<span class="${on ? 'ok' : 'off'}">${on ? '●' : '○'}</span> ${label}`;
-  const roster = s.embedder
-    ? `${s.speakers} voice${s.speakers === 1 ? '' : 's'}${s.sim ? ` · last match ${s.sim.toFixed(2)}` : ''}`
-    : 'not loaded';
   els.diag.innerHTML = [
     `<b>${(s.device || '').toUpperCase()}</b> speech recognition`,
     mark(!!s.segmenter, 'speaker turns'),
-    mark(!!s.embedder, `speaker ID — ${roster}`),
   ].join('<br>');
   els.diag.classList.remove('hidden');
 }
