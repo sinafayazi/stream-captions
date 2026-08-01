@@ -25,7 +25,8 @@
 
   const TARGET_SR = 16000;
   const STEP_MS = 500;            // min interval between interim re-transcriptions
-  const MIN_AUDIO_SEC = 0.5;      // don't transcribe less than this (Whisper hallucinates)
+  const MIN_AUDIO_SEC = 1.0;      // don't transcribe less than this (Whisper hallucinates)
+  const HOLD_TAIL = 2;            // trailing words kept revisable even once agreed
   const MAX_UTTERANCE_SEC = 6;    // force-commit a run-on with no pause/sentence break
   const SILENCE_RMS = 0.008;      // audio level below this counts as silence
   const SILENCE_COMMIT_MS = 600;  // this much trailing silence finalizes the line
@@ -180,9 +181,24 @@
     return Math.sqrt(s / Math.max(1, buf.length));
   }
 
+  // Whisper narrates non-speech instead of staying quiet: "[BLANK_AUDIO]",
+  // "[Music]", "(upbeat music)", "♪♪♪". None of it is speech, so strip it
+  // outright — ASR output otherwise never contains brackets, and parentheses
+  // only show up in these annotations.
+  function stripNonSpeech(text) {
+    return text
+      .replace(/\[[^\]]*\]?/g, SPACE)
+      .replace(/\([^)]*\)?/g, SPACE)
+      .replace(/[♪♫]/g, SPACE)
+      .replace(/\s+/g, SPACE)
+      .trim();
+  }
+
   // Whisper sometimes loops on a token ("no no no no…"). Collapse runs of the
   // same word, and guard against a runaway loop filling memory.
   function clean(text) {
+    if (!text) return '';
+    text = stripNonSpeech(text);
     if (!text) return '';
     const words = text.split(/\s+/);
     const out = [];
@@ -262,18 +278,24 @@
     scheduleTranscribe();
   }
 
-  // Write each word's first guess immediately; update a word at most ONCE — when
-  // it becomes confirmed (the leading words two consecutive passes agree on).
-  // Intermediate re-guesses for an unconfirmed word are ignored (less churn).
+  // Each pass re-decodes the whole utterance, so a later pass has more right
+  // context and often fixes an earlier mistake. Unlocked words therefore always
+  // take the newest guess — freezing them at first sight (as this used to do)
+  // made every early error permanent.
+  //
+  // A word locks once two consecutive passes agree on the prefix up to it, minus
+  // the last few: trailing words are the ones the next chunk of audio is most
+  // likely to revise, so agreeing on them twice isn't yet worth trusting.
   function updateHypothesis(words) {
     let n = 0;
     while (n < prevHyp.length && n < words.length && norm(prevHyp[n]) === norm(words[n])) n++;
     prevHyp = words;
+    const lockTo = Math.max(0, Math.min(n, words.length - HOLD_TAIL));
 
     for (let i = 0; i < words.length; i++) {
-      if (i >= displayed.length) displayed.push({ text: words[i], final: i < n });
-      else if (!displayed[i].final && i < n) displayed[i] = { text: words[i], final: true };
-      // else: keep the word already shown (ignore volatile intermediate edits)
+      if (i >= displayed.length) displayed.push({ text: words[i], final: i < lockTo });
+      else if (!displayed[i].final) displayed[i] = { text: words[i], final: i < lockTo };
+      // else: already locked — never rewrite text the viewer has read.
     }
     while (displayed.length > words.length && !displayed[displayed.length - 1].final) displayed.pop();
     interim = displayed.map((d) => d.text).join(SPACE);
@@ -378,6 +400,21 @@
     };
   }
 
+  // Rewinding a live stream (or any seek) makes the audio jump. Everything
+  // buffered belongs to the old playhead, and the in-progress hypothesis was
+  // built from it, so carrying either across the discontinuity produces a line
+  // spliced together from two different points in the stream.
+  function resetStream() {
+    pending = new Float32Array(0);
+    interim = '';
+    history = '';
+    prevHyp = [];
+    displayed = [];
+    silenceMs = 0;
+    lastSig = null;
+    render();
+  }
+
   async function hookVideo(media) {
     if (hookedVideo === media && audioCtx) return;
     await ensureAudioGraph();
@@ -395,6 +432,15 @@
     source.connect(workletNode);
     captureSource = source;
     hookedVideo = media;
+
+    if (!media._scBound) {
+      // 'emptied' also covers the player swapping its source under us, which is
+      // how Kick moves between live edge and DVR.
+      for (const evt of ['seeking', 'emptied', 'ended']) {
+        media.addEventListener(evt, () => { if (hookedVideo === media) resetStream(); });
+      }
+      media._scBound = true;
+    }
   }
 
   function stopCapture() {
@@ -414,7 +460,9 @@
       return;
     }
     ensureOverlay(media);
-    setStatus('Loading Whisper model…');
+    // Only announce the load on a cold start — a re-hook mid-stream shouldn't
+    // wipe the captions currently on screen.
+    if (!transcriber) setStatus('Loading Whisper model…');
     startEngine();
     await hookVideo(media);
   }
@@ -445,8 +493,12 @@
   }
 
   // ---- SPA navigation: re-hook when the page swaps media elements --------
+  // Only when the element we're on is really gone. During a seek its readyState
+  // dips and findMedia() can briefly prefer some other element on the page —
+  // re-hooking to that would drop the capture for good.
   setInterval(() => {
     if (!settings.enabled) return;
+    if (hookedVideo && hookedVideo.isConnected) return;
     const m = findMedia();
     if (m && m !== hookedVideo) enable();
   }, 2000);
