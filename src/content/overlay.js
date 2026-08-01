@@ -40,6 +40,7 @@
   const SEG_MIN_GAP_SEC = 1.5;    // ignore a turn this soon after the last one we acted on
   const HIDE_AFTER_MS = 4000;     // after this much inactivity, the box floats up & fades
   const STALL_MS = 8000;          // engine up this long with nothing decoded = report why
+  const MAX_CAPTURE_GAIN = 20;    // ceiling when compensating for a quiet player
   const HISTORY_CAP = 280;        // max chars of scrolled-back transcript kept
 
   const POS_CLASS = {
@@ -57,6 +58,7 @@
   let workletNode = null;
   let muteGain = null;
   let captureSource = null;
+  let captureGain = null;
   let hookedVideo = null;
 
   // Overlay DOM.
@@ -668,6 +670,10 @@
     audioCtx = new AudioContext();
     await audioCtx.audioWorklet.addModule(chrome.runtime.getURL('src/content/capture-worklet.js'));
     workletNode = new AudioWorkletNode(audioCtx, 'capture-processor');
+    // Sits on the capture branch only, so compensating for a quiet player never
+    // changes what the viewer actually hears.
+    captureGain = audioCtx.createGain();
+    captureGain.connect(workletNode);
     muteGain = audioCtx.createGain();
     muteGain.gain.value = 0;
     workletNode.connect(muteGain).connect(audioCtx.destination);
@@ -705,6 +711,17 @@
     }
   }
 
+  // createMediaElementSource hands us the audio *after* the element's volume is
+  // applied, so watching at 20% scales every sample to a fifth and the whole
+  // stream reads as silence. Undo it on the capture branch: what we transcribe
+  // shouldn't depend on how loudly you're listening.
+  function updateCaptureGain() {
+    if (!captureGain || !hookedVideo) return;
+    const vol = hookedVideo.muted ? 0 : hookedVideo.volume;
+    // A muted element emits actual zeroes; there is nothing to scale up.
+    captureGain.gain.value = vol > 0.02 ? Math.min(MAX_CAPTURE_GAIN, 1 / vol) : 1;
+  }
+
   async function hookVideo(media) {
     if (hookedVideo === media && audioCtx) return;
     await ensureAudioGraph();
@@ -718,11 +735,12 @@
       media._scSource = source;
     }
     if (captureSource && captureSource !== source) {
-      try { captureSource.disconnect(workletNode); } catch {}
+      try { captureSource.disconnect(captureGain); } catch {}
     }
-    source.connect(workletNode);
+    source.connect(captureGain);
     captureSource = source;
     hookedVideo = media;
+    updateCaptureGain();
 
     if (!media._scBound) {
       // Only a real jump counts. Live players nudge currentTime constantly to
@@ -736,12 +754,13 @@
         if (jumped) resetStream();
       });
       media.addEventListener('ended', () => { if (hookedVideo === media) resetStream(); });
+      media.addEventListener('volumechange', () => { if (hookedVideo === media) updateCaptureGain(); });
       media._scBound = true;
     }
   }
 
   function stopCapture() {
-    if (captureSource) { try { captureSource.disconnect(workletNode); } catch {} }
+    if (captureSource) { try { captureSource.disconnect(captureGain); } catch {} }
     captureSource = null;
     hookedVideo = null;
   }
@@ -805,7 +824,10 @@
         ? '⚠️ No audio captured from this player'
         : `⚠️ Audio blocked (${state}) — click the video once`);
     } else if (lastRms < SILENCE_RMS) {
-      setStatus(`⚠️ Audio is silent (level ${lastRms.toFixed(4)}) — is the player muted?`);
+      const muted = hookedVideo && (hookedVideo.muted || hookedVideo.volume === 0);
+      setStatus(muted
+        ? '⚠️ Player is muted — captions need audible audio'
+        : `⚠️ Audio is silent (level ${lastRms.toFixed(4)})`);
     } else {
       setStatus(`⚠️ ${(pending.length / TARGET_SR).toFixed(1)}s buffered but not decoding`);
     }

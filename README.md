@@ -94,6 +94,10 @@ Planned:
 - Sites that serve media cross-origin without CORS headers produce silence —
   `createMediaElementSource` can't read those samples. Kick and Twitch both use
   MSE, so they're fine.
+- **A muted player can't be captioned.** The audio tap sits after the element's
+  volume, so a muted element emits actual zeroes and there is nothing to
+  transcribe. Low volume is fine — that's compensated for on the capture branch,
+  without changing what you hear.
 - **YouTube doesn't work yet** and is not claimed as supported. You can still try
   it via **Enable on this site**, but expect it to fail — investigating is on the
   roadmap above.
