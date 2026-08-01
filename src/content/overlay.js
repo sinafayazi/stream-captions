@@ -30,7 +30,12 @@
   const MAX_UTTERANCE_SEC = 6;    // force-commit a run-on with no pause/sentence break
   const SILENCE_RMS = 0.008;      // audio level below this counts as silence
   const SILENCE_COMMIT_MS = 600;  // this much trailing silence finalizes the line
+  const SILENCE_MARK_MS = 1500;   // ...and this much more replaces it with the silence marker
   const SEEK_JUMP_SEC = 2;        // playhead move above this is a real seek, not a live-edge nudge
+  const SEG_MODEL = 'onnx-community/pyannote-segmentation-3.0';
+  const SPEAKER_CONF = 0.5;       // ignore low-confidence speaker boundaries
+  const SEG_MIN_SEC = 2;          // don't look for a turn in less audio than this
+  const SEG_EVERY_MS = 1000;      // ...and at most this often, it's a second model per pass
   const HIDE_AFTER_MS = 4000;     // after this much inactivity, the box floats up & fades
   const HISTORY_CAP = 280;        // max chars of scrolled-back transcript kept
 
@@ -42,6 +47,8 @@
   };
 
   const SPACE = ' ';
+  const MUSIC_MARK = '♪ Music';
+  const SILENCE_MARK = '···';
 
   let audioCtx = null;
   let workletNode = null;
@@ -64,6 +71,11 @@
   let transcriber = null;
   let engineLoading = false;
   let device = 'unknown';
+
+  // Speaker segmentation, loaded after Whisper so it never delays first captions.
+  let segmenter = null;
+  let segLoading = false;
+  let lastSegAt = 0;
 
   // Streaming state.
   let pending = new Float32Array(0); // audio for the in-progress utterance (16kHz)
@@ -130,7 +142,7 @@
     const sig = history + '\n' + finalWords + '\n' + tentWords;
     if (sig === lastSig) { bumpHide(); return; }
 
-    const whole = [history, finalWords].filter(Boolean).join(SPACE);
+    const whole = joinText(history, finalWords);
     finalSpan.textContent = whole;
     tentSpan.textContent = tentWords ? (whole ? SPACE : '') + tentWords : '';
 
@@ -150,15 +162,47 @@
     requestAnimationFrame(updateScroll);
   }
 
+  // Non-speech state (music playing, or nothing at all). Rendered like a caption
+  // but kept out of the transcript, so it never scrolls into the history.
+  //
+  // keepAlive holds the marker on screen while the condition lasts — right for
+  // music, wrong for silence, which should fade away like any other inactivity.
+  function showMarker(mark, keepAlive) {
+    if (!overlayEl) return;
+    if (finalSpan.textContent === mark) {
+      if (keepAlive) bumpHide();
+      return;
+    }
+    finalSpan.textContent = mark;
+    tentSpan.textContent = '';
+    lastSig = null; // force a full re-render when speech resumes
+    textEl.classList.remove('sc-hidden');
+    requestAnimationFrame(updateScroll);
+    bumpHide();
+  }
+
   function bumpHide() {
     clearTimeout(hideTimer);
     hideTimer = setTimeout(() => { if (textEl) textEl.classList.add('sc-hidden'); }, HIDE_AFTER_MS);
   }
 
+  // Join two runs of transcript, respecting a pending speaker break.
+  const joinText = (a, b) => {
+    if (!a) return b;
+    if (!b) return a;
+    return a.endsWith('\n') ? a + b : a + SPACE + b;
+  };
+
   function pushHistory(text) {
     if (!text) return;
-    history = (history ? history + SPACE : '') + text;
+    history = joinText(history, text);
     if (history.length > HISTORY_CAP) history = history.slice(-HISTORY_CAP);
+  }
+
+  // Speaker changed: put the next line on its own row, the way captions
+  // conventionally separate turns. The lens is pre-wrap, so \n is a real break.
+  function breakLine() {
+    if (history && !history.endsWith('\n')) history += '\n';
   }
 
   // ---- whisper engine ----------------------------------------------------
@@ -183,50 +227,66 @@
     return Math.sqrt(s / Math.max(1, buf.length));
   }
 
-  // Whisper narrates non-speech instead of staying quiet: "[BLANK_AUDIO]",
-  // "[Music]", "(upbeat music)", "(applause)". Those are noise to us.
+  // Whisper narrates non-speech instead of staying quiet, and the annotations
+  // fall into three groups we treat differently:
   //
-  // But it marks *sung* content the same way — "♪ lyrics ♪", "(singing) lyrics"
-  // — so dropping every bracketed group threw away song captions too. Only drop
-  // a group whose contents are entirely stage-direction vocabulary; otherwise
-  // keep the words and drop just the punctuation around them.
-  const NON_SPEECH_RX = new RegExp('^(?:[^\\p{L}\\p{N}]|\\d|\\b(?:' + [
-    'blank', 'audio', 'silence', 'silent', 'no', 'sound', 'none',
+  //   [BLANK_AUDIO], [silence], [static]  — nothing is happening. Drop it.
+  //   [Music], (upbeat music), ♪♪♪        — worth telling the viewer about, the
+  //                                         way broadcast captions do. Show ♪.
+  //   ♪ lyrics ♪, (singing) lyrics        — actual sung words. Keep the words.
+  //
+  // Anything bracketed that isn't stage-direction vocabulary is speech the model
+  // parenthesised, so keep the words and drop only the brackets.
+  const MUSIC_WORDS = [
     'music', 'musical', 'instrumental', 'song', 'melody', 'theme', 'jingle',
     'upbeat', 'soft', 'gentle', 'dramatic', 'tense', 'somber', 'playful', 'slow',
+    'singing', 'sings', 'humming', 'hums', 'vocalizing', 'whistling',
+    'playing', 'continues', 'fades', 'in', 'out', 'background',
+  ];
+  const OTHER_NON_SPEECH_WORDS = [
+    'blank', 'audio', 'silence', 'silent', 'no', 'sound', 'none',
     'applause', 'clapping', 'cheering', 'cheers', 'crowd', 'laughter', 'laughs',
     'laughing', 'inaudible', 'indistinct', 'unintelligible', 'crosstalk',
     'noise', 'static', 'beep', 'beeping', 'chime', 'buzzer', 'sighs', 'coughs',
     'coughing', 'breathing', 'footsteps', 'wind', 'rain', 'thunder', 'engine',
-    'background', 'playing', 'continues', 'fades', 'in', 'out', 'speaking',
-    'foreign', 'language', 'non', 'english', 'translated',
-    'singing', 'sings', 'humming', 'hums', 'vocalizing', 'whistling',
-  ].join('|') + ')\\b)+$', 'iu');
+    'speaking', 'foreign', 'language', 'non', 'english', 'translated',
+  ];
+  const vocabRx = (words) => new RegExp(
+    '^(?:[^\\p{L}\\p{N}]|\\d|\\b(?:' + words.join('|') + ')\\b)+$', 'iu');
+
+  const MUSIC_RX = vocabRx(MUSIC_WORDS);
+  const NON_SPEECH_RX = vocabRx([...MUSIC_WORDS, ...OTHER_NON_SPEECH_WORDS]);
 
   // BLANK_AUDIO joins its words with an underscore, which regex counts as a word
   // character — so split on it before testing, or \b never lands between them.
-  const isNonSpeech = (inner) => NON_SPEECH_RX.test(inner.replace(/_/g, SPACE).trim());
+  const forTest = (inner) => inner.replace(/_/g, SPACE).trim();
 
-  const keepIfSpeech = (_, inner) => (isNonSpeech(inner) ? SPACE : SPACE + inner + SPACE);
-
+  // Returns the annotation-free text, plus whether music was announced.
   function stripNonSpeech(text) {
-    return text
-      .replace(/\[([^\]]*)\]/g, keepIfSpeech)
-      .replace(/\(([^)]*)\)/g, keepIfSpeech)
+    let music = /[♪♫]/.test(text);
+    const group = (_, inner) => {
+      if (!NON_SPEECH_RX.test(forTest(inner))) return SPACE + inner + SPACE;
+      if (MUSIC_RX.test(forTest(inner))) music = true;
+      return SPACE;
+    };
+    const out = text
+      .replace(/\[([^\]]*)\]/g, group)
+      .replace(/\(([^)]*)\)/g, group)
       // An unclosed group is an annotation the decoder cut off mid-word; real
       // speech never contains a bracket, so there's nothing to salvage.
       .replace(/[[(][^\])]*$/, SPACE)
       .replace(/[♪♫]/g, SPACE)
       .replace(/\s+/g, SPACE)
       .trim();
+    return { text: out, music };
   }
 
   // Whisper sometimes loops on a token ("no no no no…"). Collapse runs of the
   // same word, and guard against a runaway loop filling memory.
-  function clean(text) {
-    if (!text) return '';
-    text = stripNonSpeech(text);
-    if (!text) return '';
+  function clean(raw) {
+    if (!raw) return { text: '', music: false };
+    const { text, music } = stripNonSpeech(raw);
+    if (!text) return { text: '', music };
     const words = text.split(/\s+/);
     const out = [];
     let last = '';
@@ -244,7 +304,7 @@
     }
     let s = out.join(SPACE);
     if (s.length > 400) s = s.slice(-400);
-    return s;
+    return { text: s, music };
   }
 
   async function reloadEngine() {
@@ -283,11 +343,64 @@
         device = 'wasm';
       }
       setStatus(`Captions on · ${device.toUpperCase()} · listening…`);
+      startSegmenter(); // background: captions must not wait on it
     } catch (err) {
       console.error('[Stream Captions] engine load failed:', err);
       setStatus(`⚠️ ${err && err.message ? err.message : err}`);
     } finally {
       engineLoading = false;
+    }
+  }
+
+  // ---- speaker turns -----------------------------------------------------
+  // PyAnnote tells us when the voice changes, which is all we need to break the
+  // caption onto a new line. It labels speakers only within the window it was
+  // given, so those ids mean nothing across calls — identifying *who* is talking
+  // would need embedding + clustering (WeSpeaker) on top. We only look for the
+  // boundary.
+  async function startSegmenter() {
+    if (segmenter || segLoading) return;
+    segLoading = true;
+    try {
+      const { AutoModelForAudioFrameClassification, AutoProcessor } =
+        await import(chrome.runtime.getURL('vendor/transformers.min.js'));
+      const [model, processor] = await Promise.all([
+        AutoModelForAudioFrameClassification.from_pretrained(SEG_MODEL, { device }),
+        AutoProcessor.from_pretrained(SEG_MODEL),
+      ]);
+      segmenter = { model, processor };
+      console.log('[Stream Captions] speaker segmentation ready');
+    } catch (err) {
+      // Fail open: captions are the product, speaker breaks are a nicety.
+      console.warn('[Stream Captions] speaker segmentation unavailable:', err);
+      segmenter = null;
+    } finally {
+      segLoading = false;
+    }
+  }
+
+  // Seconds into `audio` where the speaker last changes, or -1.
+  async function speakerTurnAt(audio) {
+    if (!segmenter) return -1;
+    try {
+      const { input_values } = await segmenter.processor(audio);
+      const { logits } = await segmenter.model({ input_values });
+      const segments = segmenter.processor.post_process_speaker_diarization(logits, audio.length)[0];
+      if (!segments || segments.length < 2) return -1;
+
+      const dur = audio.length / TARGET_SR;
+      let change = -1;
+      for (let i = 1; i < segments.length; i++) {
+        if (segments[i].id === segments[i - 1].id) continue;
+        if (segments[i].confidence < SPEAKER_CONF) continue;
+        change = segments[i].start;
+      }
+      // Both sides must be worth decoding on their own.
+      if (change < MIN_AUDIO_SEC || dur - change < 0.3) return -1;
+      return change;
+    } catch (err) {
+      console.warn('[Stream Captions] segmentation failed:', err);
+      return -1;
     }
   }
 
@@ -297,6 +410,11 @@
     const chunkMs = (res.length / TARGET_SR) * 1000;
     if (rms(res) < SILENCE_RMS) silenceMs += chunkMs;
     else silenceMs = 0;
+
+    // Long enough pause that the last line has already been committed: say the
+    // extension is listening and there's genuinely nothing, rather than leaving
+    // a stale caption sitting there.
+    if (silenceMs >= SILENCE_MARK_MS && !interim) showMarker(SILENCE_MARK, false);
 
     const merged = new Float32Array(pending.length + res.length);
     merged.set(pending, 0);
@@ -379,7 +497,21 @@
 
     processing = true;
     lastRunAt = now;
-    const audio = pending;
+    let audio = pending;
+
+    // Split at a speaker change before decoding, not after: decoding the whole
+    // window first would put the new speaker's words at the tail of the old
+    // speaker's line, and then repeat them on the next line.
+    let turnCut = -1;
+    if (segmenter && audio.length >= TARGET_SR * SEG_MIN_SEC && now - lastSegAt >= SEG_EVERY_MS) {
+      lastSegAt = now;
+      const turnSec = await speakerTurnAt(audio);
+      if (turnSec > 0) {
+        turnCut = Math.floor(turnSec * TARGET_SR);
+        audio = audio.slice(0, turnCut);
+      }
+    }
+
     try {
       const opts = {
         task: settings.task,
@@ -394,11 +526,35 @@
       const t0 = performance.now();
       const out = await transcriber(audio, opts);
       const ms = Math.round(performance.now() - t0);
-      const text = clean((out && out.text ? out.text : '').trim());
+      const { text, music } = clean((out && out.text ? out.text : '').trim());
+
+      // Music with no discernible lyrics: mark it and start a fresh window. The
+      // marker deliberately bypasses the word pipeline — feeding it through
+      // would scroll a trail of ♪ into the transcript history.
+      if (!text && music) {
+        showMarker(MUSIC_MARK, true);
+        pending = new Float32Array(0);
+        silenceMs = 0;
+        console.log(`[Stream Captions] ${device} · ${(audio.length / TARGET_SR).toFixed(1)}s in ${ms}ms · MUSIC`);
+        return;
+      }
 
       updateHypothesis(text ? text.split(/\s+/) : []);
       maybeFlushSentence();
       render();
+
+      // A speaker turn ends the line here and hands the rest of the audio to the
+      // next pass, so the new voice starts fresh. commit() clears pending, so
+      // the tail has to be rescued first.
+      if (turnCut > 0) {
+        const rest = pending.slice(turnCut);
+        commit();
+        breakLine();
+        pending = rest;
+        silenceMs = 0;
+        console.log(`[Stream Captions] ${device} · ${(audio.length / TARGET_SR).toFixed(1)}s in ${ms}ms · SPEAKER TURN`);
+        return;
+      }
 
       const shouldCommit = silent || tooLong;
       if (shouldCommit && interim) commit();
