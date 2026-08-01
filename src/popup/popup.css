@@ -40,6 +40,23 @@ input[type="checkbox"] {
   margin: 10px 0 0;
 }
 
+/* ---- engine status ------------------------------------------------------ */
+.diag {
+  margin-top: 10px;
+  padding: 7px 8px;
+  background: #1c1b22;
+  border-radius: 5px;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: #9a9aa5;
+}
+.diag b {
+  color: #ddd;
+  font-weight: 600;
+}
+.diag .ok { color: #53fc18; }
+.diag .off { color: #ff6b6b; }
+
 /* ---- donation footer --------------------------------------------------- */
 .support {
   display: block;

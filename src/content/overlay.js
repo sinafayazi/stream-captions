@@ -1000,7 +1000,15 @@
       if (settings.enabled && settings.model !== prevModel) reloadEngine();
       sendResponse({ ok: true });
     } else if (msg.type === 'status') {
-      sendResponse({ enabled: settings.enabled });
+      sendResponse({
+        enabled: settings.enabled,
+        device,
+        engine: !!transcriber,
+        segmenter: !!segmenter,   // speaker turns
+        embedder: !!embedder,     // speaker identity
+        speakers: speakers.length,
+        sim: lastSpeakerSim,
+      });
     }
     return true;
   });

@@ -4,6 +4,7 @@ const $ = (id) => document.getElementById(id);
 const els = {
   enabled: $('enabled'), language: $('language'), model: $('model'), position: $('position'),
   controls: $('controls'), notice: $('notice'), noticeText: $('notice-text'), noticeAction: $('notice-action'),
+  diag: $('diag'),
 };
 
 async function activeTab() {
@@ -54,6 +55,23 @@ function hideNotice() {
   els.controls.classList.remove('disabled');
 }
 
+// Which models are actually up, and what the voice clustering is doing. The
+// speaker features fail open, so without this the difference between "off",
+// "loading" and "working but merging everyone" is invisible.
+function showDiag(s) {
+  if (!s.enabled || !s.engine) return;
+  const mark = (on, label) => `<span class="${on ? 'ok' : 'off'}">${on ? '●' : '○'}</span> ${label}`;
+  const roster = s.embedder
+    ? `${s.speakers} voice${s.speakers === 1 ? '' : 's'}${s.sim ? ` · last match ${s.sim.toFixed(2)}` : ''}`
+    : 'not loaded';
+  els.diag.innerHTML = [
+    `<b>${(s.device || '').toUpperCase()}</b> speech recognition`,
+    mark(!!s.segmenter, 'speaker turns'),
+    mark(!!s.embedder, `speaker ID — ${roster}`),
+  ].join('<br>');
+  els.diag.classList.remove('hidden');
+}
+
 // Load shared settings (language/model/position) into the UI.
 chrome.storage.sync.get(DEFAULTS, (s) => {
   els.language.value = s.language;
@@ -102,6 +120,7 @@ async function enableOnThisSite(tab) {
   const res = await send(tab.id, { type: 'status' });
   if (res) {
     els.enabled.checked = !!res.enabled;
+    showDiag(res);
     return;
   }
 
