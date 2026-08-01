@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Stream Captions",
   "version": "1.0.0",
-  "description": "Real-time subtitles for any video or music — built for Kick, works everywhere. On-device Whisper (WebGPU). Free & private.",
+  "description": "Real-time subtitles for Kick, Twitch and any video or music. Runs entirely on your device with Whisper — free and private.",
   "homepage_url": "https://github.com/sinafayazi/stream-captions",
   "permissions": ["storage", "activeTab", "scripting"],
   "optional_host_permissions": ["*://*/*"],
