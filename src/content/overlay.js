@@ -39,6 +39,7 @@
   const SEG_WINDOW_SEC = 10;      // rolling context pyannote sees, independent of the caption buffer
   const SEG_MIN_GAP_SEC = 1.5;    // ignore a turn this soon after the last one we acted on
   const HIDE_AFTER_MS = 4000;     // after this much inactivity, the box floats up & fades
+  const STALL_MS = 8000;          // engine up this long with nothing decoded = report why
   const HISTORY_CAP = 280;        // max chars of scrolled-back transcript kept
 
   const POS_CLASS = {
@@ -74,6 +75,7 @@
   let transcriber = null;
   let engineLoading = false;
   let device = 'unknown';
+  let engineReadyAt = 0;
 
   // Speaker segmentation, loaded after Whisper so it never delays first captions.
   let segmenter = null;
@@ -94,6 +96,9 @@
   let silenceMs = 0;
   let processing = false;
   let failures = 0;                  // consecutive transcribe errors
+  let chunksIn = 0;                  // audio batches received from the worklet
+  let lastRms = 0;                   // level of the most recent batch
+  let lastDecodeAt = 0;              // when Whisper last returned anything
   let mediaTime = 0;                 // playhead as of the last audio chunk, to size seeks
 
   const norm = (w) => w.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
@@ -384,6 +389,7 @@
         settings.model = fallback;
         await load(fallback);
       }
+      engineReadyAt = performance.now();
       console.log(`[Stream Captions] engine ready · ${settings.model} · ${device} · english-only=${isEnglishOnly(settings.model)}`);
       setStatus(`Captions on · ${device.toUpperCase()} · listening…`);
       startSegmenter(); // background: captions must not wait on it
@@ -460,7 +466,9 @@
     if (hookedVideo) mediaTime = hookedVideo.currentTime;
     const res = resampleTo16k(chunk, sr);
     const chunkMs = (res.length / TARGET_SR) * 1000;
-    if (rms(res) < SILENCE_RMS) silenceMs += chunkMs;
+    chunksIn++;
+    lastRms = rms(res);
+    if (lastRms < SILENCE_RMS) silenceMs += chunkMs;
     else silenceMs = 0;
 
     // Long enough pause that the last line has already been committed: say the
@@ -606,6 +614,7 @@
       const out = await transcriber(audio, opts);
       const ms = Math.round(performance.now() - t0);
       failures = 0;
+      lastDecodeAt = performance.now();
       const { text, music } = clean((out && out.text ? out.text : '').trim());
 
       // Music with no discernible lyrics: mark it and start a fresh window. The
@@ -685,10 +694,22 @@
     render();
   }
 
+  // The toggle lives in the popup, which is not a user gesture in the page, so
+  // Chrome can refuse to start the AudioContext and leave it suspended — which
+  // delivers no audio at all, silently. Retry on the first real interaction.
+  function armResume() {
+    if (!audioCtx || audioCtx.state === 'running') return;
+    const go = () => { if (audioCtx) audioCtx.resume().catch(() => {}); };
+    for (const evt of ['pointerdown', 'keydown']) {
+      document.addEventListener(evt, go, { once: true, capture: true });
+    }
+  }
+
   async function hookVideo(media) {
     if (hookedVideo === media && audioCtx) return;
     await ensureAudioGraph();
     await audioCtx.resume().catch(() => {});
+    armResume();
 
     let source = media._scSource;
     if (!source) {
@@ -767,6 +788,28 @@
     const ready = all.find((m) => m.readyState > 0 || m.currentTime > 0);
     return ready || all[0] || null;
   }
+
+  // ---- startup watchdog --------------------------------------------------
+  // "Listening…" with nothing behind it is the same picture whether no audio is
+  // reaching us, the audio is silent, or the decoder is being gated out. Once
+  // anything has decoded successfully this goes quiet for good, so it only ever
+  // reports a cold start that never got going.
+  setInterval(() => {
+    if (!settings.enabled || !transcriber || !overlayEl) return;
+    if (lastDecodeAt !== 0) return;
+    if (performance.now() - engineReadyAt < STALL_MS) return;
+
+    if (chunksIn === 0) {
+      const state = audioCtx ? audioCtx.state : 'no context';
+      setStatus(state === 'running'
+        ? '⚠️ No audio captured from this player'
+        : `⚠️ Audio blocked (${state}) — click the video once`);
+    } else if (lastRms < SILENCE_RMS) {
+      setStatus(`⚠️ Audio is silent (level ${lastRms.toFixed(4)}) — is the player muted?`);
+    } else {
+      setStatus(`⚠️ ${(pending.length / TARGET_SR).toFixed(1)}s buffered but not decoding`);
+    }
+  }, 4000);
 
   // ---- SPA navigation: re-hook when the page swaps media elements --------
   // Only when the element we're on is really gone. During a seek findMedia() can
