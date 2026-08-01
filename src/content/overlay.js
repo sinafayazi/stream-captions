@@ -93,6 +93,7 @@
   let lastRunAt = 0;
   let silenceMs = 0;
   let processing = false;
+  let failures = 0;                  // consecutive transcribe errors
   let mediaTime = 0;                 // playhead as of the last audio chunk, to size seeks
 
   const norm = (w) => w.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
@@ -361,14 +362,29 @@
         }
       };
 
+      const load = async (model) => {
+        try {
+          transcriber = await pipeline('automatic-speech-recognition', model, { device: 'webgpu', dtype: 'fp32', progress_callback });
+          device = 'webgpu';
+        } catch (e) {
+          setStatus('WebGPU unavailable — loading WASM…');
+          transcriber = await pipeline('automatic-speech-recognition', model, { device: 'wasm', progress_callback });
+          device = 'wasm';
+        }
+      };
+
       try {
-        transcriber = await pipeline('automatic-speech-recognition', settings.model, { device: 'webgpu', dtype: 'fp32', progress_callback });
-        device = 'webgpu';
+        await load(settings.model);
       } catch (e) {
-        setStatus('WebGPU unavailable — loading WASM…');
-        transcriber = await pipeline('automatic-speech-recognition', settings.model, { device: 'wasm', progress_callback });
-        device = 'wasm';
+        // An English-only checkpoint that won't load shouldn't kill captions —
+        // drop to the multilingual build of the same size and carry on.
+        if (!isEnglishOnly(settings.model)) throw e;
+        const fallback = settings.model.replace(/\.en$/, '');
+        console.warn(`[Stream Captions] ${settings.model} failed to load, falling back to ${fallback}:`, e);
+        settings.model = fallback;
+        await load(fallback);
       }
+      console.log(`[Stream Captions] engine ready · ${settings.model} · ${device} · english-only=${isEnglishOnly(settings.model)}`);
       setStatus(`Captions on · ${device.toUpperCase()} · listening…`);
       startSegmenter(); // background: captions must not wait on it
     } catch (err) {
@@ -589,6 +605,7 @@
       const t0 = performance.now();
       const out = await transcriber(audio, opts);
       const ms = Math.round(performance.now() - t0);
+      failures = 0;
       const { text, music } = clean((out && out.text ? out.text : '').trim());
 
       // Music with no discernible lyrics: mark it and start a fresh window. The
@@ -623,7 +640,10 @@
       if (shouldCommit && interim) commit();
       console.log(`[Stream Captions] ${device} · ${(audio.length / TARGET_SR).toFixed(1)}s in ${ms}ms · ${shouldCommit ? 'COMMIT' : 'interim'}`);
     } catch (err) {
+      // Don't fail silently behind a stale "listening…". One error can be a
+      // blip; three in a row is broken, and the user should be told what.
       console.warn('[Stream Captions] transcribe error:', err);
+      if (++failures >= 3) setStatus(`⚠️ ${err && err.message ? err.message : err}`);
     } finally {
       processing = false;
       scheduleTranscribe();
