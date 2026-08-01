@@ -17,7 +17,7 @@
   const DEFAULTS = {
     enabled: false,
     language: 'english',
-    model: 'Xenova/whisper-tiny',
+    model: 'Xenova/whisper-base.en',
     task: 'transcribe',
     position: 'bottom-center',
   };
@@ -96,6 +96,8 @@
   let mediaTime = 0;                 // playhead as of the last audio chunk, to size seeks
 
   const norm = (w) => w.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+  // .en checkpoints are English-only and throw if given a task or language.
+  const isEnglishOnly = (model) => /\.en$/.test(model || '');
   const streamSec = () => totalSamples / TARGET_SR;
 
   // ---- overlay rendering -------------------------------------------------
@@ -569,15 +571,20 @@
     }
 
     try {
-      const opts = {
-        task: settings.task,
-        chunk_length_s: 30,
-        return_timestamps: false,
-        no_repeat_ngram_size: 3,
-        repetition_penalty: 1.3,
-        temperature: 0,
-      };
-      if (settings.language && settings.language !== 'auto') opts.language = settings.language;
+      // Deliberately close to Whisper's own decoding. no_repeat_ngram_size and
+      // repetition_penalty were here to fight looping, but they hurt more than
+      // they help: speech repeats trigrams constantly ("I don't know, I don't
+      // know"), and banning them makes the model emit a different, wrong word
+      // instead. clean() collapses real loops after the fact, which is the right
+      // place for it. chunk_length_s is for long-form audio and only adds
+      // overhead on the 1-6s windows we actually pass.
+      const opts = { return_timestamps: false, temperature: 0 };
+
+      // English-only checkpoints reject these two outright.
+      if (!isEnglishOnly(settings.model)) {
+        opts.task = settings.task;
+        if (settings.language && settings.language !== 'auto') opts.language = settings.language;
+      }
 
       const t0 = performance.now();
       const out = await transcriber(audio, opts);

@@ -59,9 +59,11 @@ content scripts can't construct a Worker from an extension URL.
 
 ## Settings (popup)
 - **Captions** — on/off, per tab
-- **Language** — English (the engine already handles the full multilingual set
-  and translate-to-English; the picker doesn't expose them yet)
-- **Model** — tiny (fastest) / base / small (most accurate), switches on the fly
+- **Language** — English. The models shipped are the English-only Whisper
+  checkpoints, which are more accurate than the multilingual ones at the same
+  size; multilingual + translate needs a model switch as well as a picker
+- **Model** — tiny.en (fastest) / base.en / small.en (most accurate), switches
+  on the fly
 - **Position** — which corner the overlay sits in
 
 ## Privacy
@@ -76,7 +78,7 @@ Working:
 - [x] ONNX runtime + transformers.js vendored locally (no remotely hosted code)
 
 Planned:
-- [ ] Expose the multilingual picker + translate-to-English (engine already does both)
+- [ ] Multilingual picker + translate-to-English (needs the multilingual checkpoints back)
 - [ ] Timestamp-accurate audio trimming (currently trims by word-count fraction)
 - [ ] Real VAD instead of an RMS gate, so music/noise stops triggering hallucinations
 - [ ] `.srt` / `.vtt` export for VODs

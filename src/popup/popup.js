@@ -1,4 +1,4 @@
-const DEFAULTS = { enabled: false, language: 'english', model: 'Xenova/whisper-tiny', task: 'transcribe', position: 'bottom-center' };
+const DEFAULTS = { enabled: false, language: 'english', model: 'Xenova/whisper-base.en', task: 'transcribe', position: 'bottom-center' };
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -58,6 +58,9 @@ function hideNotice() {
 chrome.storage.sync.get(DEFAULTS, (s) => {
   els.language.value = s.language;
   els.model.value = s.model;
+  // A model stored by an older version may no longer be offered — don't leave
+  // the select showing blank.
+  if (!els.model.value) els.model.value = DEFAULTS.model;
   els.position.value = s.position;
 });
 
