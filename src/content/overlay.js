@@ -39,8 +39,9 @@
   const SEG_WINDOW_SEC = 10;      // rolling context pyannote sees, independent of the caption buffer
   const SEG_MIN_GAP_SEC = 1.5;    // ignore a turn this soon after the last one we acted on
   const SPK_MODEL = 'onnx-community/wespeaker-voxceleb-resnet34-LM';
-  const SPEAKER_SIM = 0.55;       // cosine above this is the same voice
+  const SPEAKER_SIM = 0.7;        // cosine above this is the same voice
   const SPK_MIN_SEC = 1.0;        // shorter clips don't embed reliably
+  const SPK_MAX_SEC = 3;          // embed only the tail; a longer clip risks two voices in one vector
   const MAX_SPEAKERS = 6;         // cap the roster; streams aren't unbounded casts
   const HIDE_AFTER_MS = 4000;     // after this much inactivity, the box floats up & fades
   const STALL_MS = 8000;          // engine up this long with nothing decoded = report why
@@ -96,6 +97,7 @@
   let speakers = [];                 // [{centroid, count}] voice roster
   let currentSpeaker = -1;           // who the line being committed belongs to
   let lastLineSpeaker = -1;          // who the previous committed line belonged to
+  let lastSpeakerSim = 0;            // similarity behind the last assignment, for tuning
 
   // Streaming state.
   let pending = new Float32Array(0); // audio for the in-progress utterance (16kHz)
@@ -419,6 +421,18 @@
   // given, so those ids mean nothing across calls — identifying *who* is talking
   // would need embedding + clustering (WeSpeaker) on top. We only look for the
   // boundary.
+  // Whisper falls back to WASM when WebGPU can't run it; these two did not, so
+  // a device that rejects them killed every speaker feature silently.
+  async function onDeviceOrWasm(load) {
+    try {
+      return await load(device);
+    } catch (err) {
+      if (device === 'wasm') throw err;
+      console.warn('[Stream Captions] webgpu rejected the model, retrying on wasm:', err);
+      return await load('wasm');
+    }
+  }
+
   async function startSegmenter() {
     if (segmenter || segLoading) return;
     segLoading = true;
@@ -426,7 +440,7 @@
       const { AutoModelForAudioFrameClassification, AutoProcessor } =
         await import(chrome.runtime.getURL('vendor/transformers.min.js'));
       const [model, processor] = await Promise.all([
-        AutoModelForAudioFrameClassification.from_pretrained(SEG_MODEL, { device }),
+        onDeviceOrWasm((d) => AutoModelForAudioFrameClassification.from_pretrained(SEG_MODEL, { device: d })),
         AutoProcessor.from_pretrained(SEG_MODEL),
       ]);
       segmenter = { model, processor };
@@ -452,7 +466,7 @@
       const { WeSpeakerResNetModel, AutoProcessor } =
         await import(chrome.runtime.getURL('vendor/transformers.min.js'));
       const [model, processor] = await Promise.all([
-        WeSpeakerResNetModel.from_pretrained(SPK_MODEL, { device }),
+        onDeviceOrWasm((d) => WeSpeakerResNetModel.from_pretrained(SPK_MODEL, { device: d })),
         AutoProcessor.from_pretrained(SPK_MODEL),
       ]);
       embedder = { model, processor };
@@ -486,10 +500,12 @@
   function assignSpeaker(vec) {
     let best = -1;
     let bestSim = -Infinity;
+    lastSpeakerSim = 0;
     for (let i = 0; i < speakers.length; i++) {
       const sim = cosine(vec, speakers[i].centroid);
       if (sim > bestSim) { bestSim = sim; best = i; }
     }
+    lastSpeakerSim = speakers.length ? bestSim : 0;
     if (best >= 0 && bestSim >= SPEAKER_SIM) {
       const s = speakers[best];
       const merged = new Float32Array(vec.length);
@@ -506,7 +522,12 @@
   async function speakerIdFor(audio) {
     if (!embedder || audio.length < TARGET_SR * SPK_MIN_SEC) return -1;
     try {
-      const inputs = await embedder.processor(audio);
+      // Embed the tail only. A long window can span two voices, and averaging
+      // them produces a vector close to everyone — which collapses the whole
+      // roster into a single cluster and suppresses labels entirely.
+      const cap = TARGET_SR * SPK_MAX_SEC;
+      const clip = audio.length > cap ? audio.slice(-cap) : audio;
+      const inputs = await embedder.processor(clip);
       const out = await embedder.model(inputs);
       // The output key varies by export; take the embedding whatever it's called.
       const tensor = out.embeddings ?? out.logits ?? Object.values(out)[0];
@@ -517,6 +538,13 @@
       console.warn('[Stream Captions] speaker embedding failed:', err);
       return -1;
     }
+  }
+
+  // One cluster swallowing everyone is indistinguishable from the feature being
+  // off, since labels need two known voices. Report which it is.
+  function logSpeaker() {
+    if (!embedder) { console.log('[Stream Captions] speaker: embedder not loaded'); return; }
+    console.log(`[Stream Captions] speaker S${currentSpeaker + 1} · sim ${lastSpeakerSim.toFixed(2)} · threshold ${SPEAKER_SIM} · roster ${speakers.length}`);
   }
 
   // Label only when the voice actually changes. Repeating it on every line of a
@@ -741,7 +769,7 @@
         speakerBreakPending = true;
         // Identify the voice from the audio that produced this line, before it
         // is discarded — once per line, not once per interim pass.
-        if (interim) currentSpeaker = await speakerIdFor(audio);
+        if (interim) { currentSpeaker = await speakerIdFor(audio); logSpeaker(); }
         commit();
         pending = rest;
         silenceMs = 0;
@@ -752,6 +780,7 @@
       const shouldCommit = silent || tooLong;
       if (shouldCommit && interim) {
         currentSpeaker = await speakerIdFor(audio);
+        logSpeaker();
         commit();
       }
       console.log(`[Stream Captions] ${device} · ${(audio.length / TARGET_SR).toFixed(1)}s in ${ms}ms · ${shouldCommit ? 'COMMIT' : 'interim'}`);
