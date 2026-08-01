@@ -38,6 +38,10 @@
   const SEG_EVERY_MS = 1000;      // ...and at most this often, it's a second model per pass
   const SEG_WINDOW_SEC = 10;      // rolling context pyannote sees, independent of the caption buffer
   const SEG_MIN_GAP_SEC = 1.5;    // ignore a turn this soon after the last one we acted on
+  const SPK_MODEL = 'onnx-community/wespeaker-voxceleb-resnet34-LM';
+  const SPEAKER_SIM = 0.55;       // cosine above this is the same voice
+  const SPK_MIN_SEC = 1.0;        // shorter clips don't embed reliably
+  const MAX_SPEAKERS = 6;         // cap the roster; streams aren't unbounded casts
   const HIDE_AFTER_MS = 4000;     // after this much inactivity, the box floats up & fades
   const STALL_MS = 8000;          // engine up this long with nothing decoded = report why
   const MAX_CAPTURE_GAIN = 20;    // ceiling when compensating for a quiet player
@@ -87,6 +91,11 @@
   let totalSamples = 0;              // every sample ever captured, as a stream clock
   let lastTurnAbs = -Infinity;       // stream time of the last turn we acted on
   let speakerBreakPending = false;   // a turn we couldn't split on; break at the next commit
+  let embedder = null;               // WeSpeaker, for identity across windows
+  let embLoading = false;
+  let speakers = [];                 // [{centroid, count}] voice roster
+  let currentSpeaker = -1;           // who the line being committed belongs to
+  let lastLineSpeaker = -1;          // who the previous committed line belonged to
 
   // Streaming state.
   let pending = new Float32Array(0); // audio for the in-progress utterance (16kHz)
@@ -395,6 +404,7 @@
       console.log(`[Stream Captions] engine ready · ${settings.model} · ${device} · english-only=${isEnglishOnly(settings.model)}`);
       setStatus(`Captions on · ${device.toUpperCase()} · listening…`);
       startSegmenter(); // background: captions must not wait on it
+      startEmbedder();
     } catch (err) {
       console.error('[Stream Captions] engine load failed:', err);
       setStatus(`⚠️ ${err && err.message ? err.message : err}`);
@@ -428,6 +438,92 @@
     } finally {
       segLoading = false;
     }
+  }
+
+  // ---- speaker identity --------------------------------------------------
+  // PyAnnote says *that* the voice changed; it can't say who, because its labels
+  // only mean anything inside the one window it was given. WeSpeaker turns a clip
+  // into a voice embedding that stays comparable across the whole stream, so
+  // those can be clustered online to give each speaker a stable number.
+  async function startEmbedder() {
+    if (embedder || embLoading) return;
+    embLoading = true;
+    try {
+      const { WeSpeakerResNetModel, AutoProcessor } =
+        await import(chrome.runtime.getURL('vendor/transformers.min.js'));
+      const [model, processor] = await Promise.all([
+        WeSpeakerResNetModel.from_pretrained(SPK_MODEL, { device }),
+        AutoProcessor.from_pretrained(SPK_MODEL),
+      ]);
+      embedder = { model, processor };
+      console.log('[Stream Captions] speaker identity ready');
+    } catch (err) {
+      console.warn('[Stream Captions] speaker identity unavailable:', err);
+      embedder = null;
+    } finally {
+      embLoading = false;
+    }
+  }
+
+  // Both sides are unit vectors, so the dot product is the cosine.
+  function cosine(a, b) {
+    let dot = 0;
+    for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
+    return dot;
+  }
+
+  function unit(vec) {
+    let n = 0;
+    for (let i = 0; i < vec.length; i++) n += vec[i] * vec[i];
+    n = Math.sqrt(n) || 1;
+    const out = new Float32Array(vec.length);
+    for (let i = 0; i < vec.length; i++) out[i] = vec[i] / n;
+    return out;
+  }
+
+  // Nearest known voice, or a new one. Centroids are a running mean, so a speaker
+  // keeps sharpening as they talk instead of being pinned to their first clip.
+  function assignSpeaker(vec) {
+    let best = -1;
+    let bestSim = -Infinity;
+    for (let i = 0; i < speakers.length; i++) {
+      const sim = cosine(vec, speakers[i].centroid);
+      if (sim > bestSim) { bestSim = sim; best = i; }
+    }
+    if (best >= 0 && bestSim >= SPEAKER_SIM) {
+      const s = speakers[best];
+      const merged = new Float32Array(vec.length);
+      for (let i = 0; i < vec.length; i++) merged[i] = s.centroid[i] * s.count + vec[i];
+      s.centroid = unit(merged);
+      s.count++;
+      return best;
+    }
+    if (speakers.length >= MAX_SPEAKERS) return best; // don't grow without bound
+    speakers.push({ centroid: vec, count: 1 });
+    return speakers.length - 1;
+  }
+
+  async function speakerIdFor(audio) {
+    if (!embedder || audio.length < TARGET_SR * SPK_MIN_SEC) return -1;
+    try {
+      const inputs = await embedder.processor(audio);
+      const out = await embedder.model(inputs);
+      // The output key varies by export; take the embedding whatever it's called.
+      const tensor = out.embeddings ?? out.logits ?? Object.values(out)[0];
+      const data = tensor && tensor.data ? tensor.data : tensor;
+      if (!data || !data.length) return -1;
+      return assignSpeaker(unit(data));
+    } catch (err) {
+      console.warn('[Stream Captions] speaker embedding failed:', err);
+      return -1;
+    }
+  }
+
+  // Label only when the voice actually changes. Repeating it on every line of a
+  // monologue is noise in a two-line lens.
+  function speakerPrefix(id) {
+    if (id < 0 || speakers.length < 2 || id === lastLineSpeaker) return '';
+    return `S${id + 1}: `;
   }
 
   // How many seconds before the END of `audio` the speaker last changed, or -1.
@@ -522,7 +618,10 @@
 
   // Utterance ended (silence / length cap): finalize the line, reset.
   function commit() {
-    if (interim) pushHistory(interim);
+    if (interim) {
+      pushHistory(speakerPrefix(currentSpeaker) + interim);
+      if (currentSpeaker >= 0) lastLineSpeaker = currentSpeaker;
+    }
     if (speakerBreakPending) { breakLine(); speakerBreakPending = false; }
     interim = '';
     prevHyp = [];
@@ -640,6 +739,9 @@
       if (turnCut > 0) {
         const rest = pending.slice(turnCut);
         speakerBreakPending = true;
+        // Identify the voice from the audio that produced this line, before it
+        // is discarded — once per line, not once per interim pass.
+        if (interim) currentSpeaker = await speakerIdFor(audio);
         commit();
         pending = rest;
         silenceMs = 0;
@@ -648,7 +750,10 @@
       }
 
       const shouldCommit = silent || tooLong;
-      if (shouldCommit && interim) commit();
+      if (shouldCommit && interim) {
+        currentSpeaker = await speakerIdFor(audio);
+        commit();
+      }
       console.log(`[Stream Captions] ${device} · ${(audio.length / TARGET_SR).toFixed(1)}s in ${ms}ms · ${shouldCommit ? 'COMMIT' : 'interim'}`);
     } catch (err) {
       // Don't fail silently behind a stale "listening…". One error can be a
@@ -691,6 +796,8 @@
     segBuf = new Float32Array(0);
     speakerBreakPending = false;
     lastTurnAbs = -Infinity;
+    currentSpeaker = -1;
+    lastLineSpeaker = -1;
     interim = '';
     history = '';
     prevHyp = [];

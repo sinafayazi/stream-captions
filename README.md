@@ -74,6 +74,7 @@ your device and are discarded as you go. See [PRIVACY.md](PRIVACY.md).
 Working:
 - [x] On-device transcription overlay for Kick and Twitch (live & VOD)
 - [x] Any other site via per-site opt-in
+- [x] Speaker turns break the line, and recurring voices are labelled S1/S2/…
 - [x] Model switching, overlay position, streaming word-lock display
 - [x] ONNX runtime + transformers.js vendored locally (no remotely hosted code)
 
@@ -85,6 +86,7 @@ Planned:
 - [ ] Caption styling controls (size, opacity, line count)
 - [ ] Keyboard shortcut to toggle without opening the popup
 - [ ] Work out why YouTube fails, and support it properly
+- [ ] Colour-code speakers instead of / alongside the S1: prefix
 
 ## Notes & limitations
 - **WebGPU** gives near-real-time on `tiny`/`base`; WASM-only is much slower.
