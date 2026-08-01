@@ -183,8 +183,8 @@
     if (!overlayEl) return;
     let fp = 0;
     while (fp < displayed.length && displayed[fp].final) fp++;
-    const finalWords = displayed.slice(0, fp).map((d) => d.text).join(SPACE);
-    const tentWords = displayed.slice(fp).map((d) => d.text).join(SPACE);
+    const finalWords = turnsToBreaks(displayed.slice(0, fp).map((d) => d.text).join(SPACE));
+    const tentWords = turnsToBreaks(displayed.slice(fp).map((d) => d.text).join(SPACE));
     const sig = history + '\n' + finalWords + '\n' + tentWords;
     if (sig === lastSig) { bumpHide(); return; }
 
@@ -250,6 +250,12 @@
   function breakLine() {
     if (history && !history.endsWith('\n')) history += '\n';
   }
+
+  // Whisper emits ">>" for a speaker change — it learned the convention from the
+  // closed captions in its training data. That's a free turn signal from the
+  // model itself, independent of PyAnnote, so honour it as a line break instead
+  // of printing the arrows.
+  const turnsToBreaks = (text) => text.replace(/\s*>>+\s*/g, '\n').replace(/^\n+/, '');
 
   // ---- whisper engine ----------------------------------------------------
   function resampleTo16k(input, srcRate) {
@@ -647,7 +653,11 @@
   // Utterance ended (silence / length cap): finalize the line, reset.
   function commit() {
     if (interim) {
-      pushHistory(speakerPrefix(currentSpeaker) + interim);
+      const prefix = speakerPrefix(currentSpeaker);
+      // A new voice always starts its own row. Without this the label lands
+      // mid-sentence, in the middle of the previous speaker's line.
+      if (prefix) breakLine();
+      pushHistory(prefix + turnsToBreaks(interim));
       if (currentSpeaker >= 0) lastLineSpeaker = currentSpeaker;
     }
     if (speakerBreakPending) { breakLine(); speakerBreakPending = false; }
