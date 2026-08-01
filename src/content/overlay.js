@@ -254,6 +254,11 @@
 
   const formatLines = (text) => splitSentences(turnsToBreaks(text)).replace(/^\n+/, '').trim();
 
+  // Splitting only works inside one string. Once a finished sentence lands in
+  // history the next one arrives separately, and joinText would glue it on with
+  // a space — so close the row here instead.
+  const endsSentence = (text) => /[.!?…]+["'\u2019\u201d)\]]?$/.test(text.trim());
+
   // ---- whisper engine ----------------------------------------------------
   function resampleTo16k(input, srcRate) {
     if (srcRate === TARGET_SR) return input;
@@ -575,7 +580,9 @@
   // Utterance ended (silence / length cap): finalize the line, reset.
   function commit() {
     if (interim) {
-      pushHistory(formatLines(interim));
+      const line = formatLines(interim);
+      pushHistory(line);
+      if (endsSentence(line)) breakLine();
     }
     if (speakerBreakPending) { breakLine(); speakerBreakPending = false; }
     interim = '';
@@ -603,7 +610,8 @@
     displayed = displayed.slice(cut + 1);
     prevHyp = prevHyp.slice(cut + 1);
     interim = displayed.map((d) => d.text).join(SPACE);
-    pushHistory(sentenceWords.join(SPACE).trim());
+    pushHistory(formatLines(sentenceWords.join(SPACE)));
+    breakLine(); // this flush is a sentence boundary by construction
   }
 
   async function scheduleTranscribe() {
